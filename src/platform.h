@@ -1,5 +1,5 @@
-#ifndef PLATFORM_H
-#define PLATFORM_H
+#ifndef GBOYC_PLATFORM_H
+#define GBOYC_PLATFORM_H
 
 #include <stdbool.h>
 #include <stdint.h>
@@ -7,12 +7,42 @@
 #define GB_SCREEN_W 160
 #define GB_SCREEN_H 144
 
+#define UI_VIEW_W (GB_SCREEN_W * 2)
+#define UI_VIEW_H (GB_SCREEN_H * 2)
+
+#define PLATFORM_PATH_MAX 4096
+
 typedef struct Platform Platform;
+
+typedef enum {
+	PLATFORM_EV_QUIT,
+	PLATFORM_EV_UP,
+	PLATFORM_EV_DOWN,
+	PLATFORM_EV_CONFIRM,
+	PLATFORM_EV_BACK,
+	PLATFORM_EV_FILE_CHOSEN,
+	PLATFORM_EV_DIALOG_CANCELED,
+	PLATFORM_EV_DIALOG_FAILED,
+} PlatformEventType;
+
+typedef struct {
+	PlatformEventType type;
+	char path[PLATFORM_PATH_MAX];
+} PlatformEvent;
 
 Platform *platform_create(const char *title, int scale);
 void platform_destroy(Platform *p);
 
-bool platform_poll_events(Platform *p);
+bool platform_next_event(Platform *p, PlatformEvent *ev);
+
+void platform_set_view(Platform *p, int w, int h);
+
+void platform_clear(Platform *p, uint32_t argb);
+void platform_draw_text(Platform *p, int x, int y, int scale, uint32_t argb, const char *text);
+void platform_draw_text_centered(Platform *p, int y, int scale, uint32_t argb, const char *text);
+void platform_flip(Platform *p);
+
+void platform_open_file_dialog(Platform *p);
 
 void platform_present(Platform *p, const uint32_t *framebuffer);
 
