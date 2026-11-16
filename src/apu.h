@@ -28,6 +28,7 @@ typedef struct {
 	uint8_t reg[0x17];
 	uint8_t wave[16];
 	bool power;
+	bool wave_access;
 	uint8_t fs_step;
 	uint16_t fs_cycles;
 	uint8_t sweep_timer;

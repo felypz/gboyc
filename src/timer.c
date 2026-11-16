@@ -5,36 +5,50 @@
 #define ADDR_TMA  0xFF06
 #define ADDR_TAC  0xFF07
 
+enum {
+	RELOAD_NONE,
+	RELOAD_PENDING,
+	RELOAD_DONE,
+};
+
 static const uint8_t TAC_BIT[4] = {9, 3, 5, 7};
 
 static bool signal(const Timer *t) {
 	return (t->tac & 4) && ((t->div >> TAC_BIT[t->tac & 3]) & 1);
 }
 
-static bool increment(Timer *t) {
+static void increment(Timer *t) {
 	if (++t->tima == 0) {
-		t->tima = t->tma;
-		return true;
+		t->reload = RELOAD_PENDING;
 	}
-	return false;
 }
 
-static bool update(Timer *t, uint16_t div, uint8_t tac) {
+static void update(Timer *t, uint16_t div, uint8_t tac) {
 	bool before = signal(t);
+
 	t->div = div;
 	t->tac = tac;
-	return before && !signal(t) && increment(t);
+	if (before && !signal(t)) {
+		increment(t);
+	}
 }
 
 void timer_reset(Timer *t) {
 	*t = (Timer){.div = 0xABCC};
 }
 
-bool timer_step(Timer *t, int cycles) {
+bool timer_step(Timer *t) {
 	bool irq = false;
-	for (int i = 0; i < cycles; i += 4) {
-		irq |= update(t, (uint16_t)(t->div + 4), t->tac);
+
+	if (t->reload == RELOAD_PENDING) {
+		t->tima = t->tma;
+		t->reload = RELOAD_DONE;
+		irq = true;
+	} else {
+		t->reload = RELOAD_NONE;
 	}
+
+	update(t, (uint16_t)(t->div + 4), t->tac);
 	return irq;
 }
 
@@ -51,17 +65,25 @@ uint8_t timer_read(const Timer *t, uint16_t addr) {
 	}
 }
 
-bool timer_write(Timer *t, uint16_t addr, uint8_t value) {
+void timer_write(Timer *t, uint16_t addr, uint8_t value) {
 	switch (addr) {
 	case ADDR_DIV:
-		return update(t, 0, t->tac);
+		update(t, 0, t->tac);
+		break;
 	case ADDR_TIMA:
-		t->tima = value;
-		return false;
+		if (t->reload != RELOAD_DONE) {
+			t->tima = value;
+			t->reload = RELOAD_NONE;
+		}
+		break;
 	case ADDR_TMA:
 		t->tma = value;
-		return false;
+		if (t->reload == RELOAD_DONE) {
+			t->tima = value;
+		}
+		break;
 	default:
-		return update(t, t->div, value & 7);
+		update(t, t->div, value & 7);
+		break;
 	}
 }

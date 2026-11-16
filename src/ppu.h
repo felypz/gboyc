@@ -27,6 +27,7 @@ typedef struct {
 	uint8_t mode;
 	uint8_t window_line;
 	uint16_t dot;
+	uint16_t draw_end;
 	uint32_t off_dots;
 	bool stat_line;
 	bool frame_done;

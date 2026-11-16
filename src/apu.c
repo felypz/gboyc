@@ -2,11 +2,12 @@
 
 #include <string.h>
 
-#define CPU_HZ			 4194304U
-#define FRAME_SEQ_CYCLES 8192
-#define HPF_CHARGE		 0.996f
-#define MIX_NORM		 (1.0f / 480.0f)
-#define OUTPUT_GAIN		 1.5f
+#define CPU_HZ			   4194304U
+#define FRAME_SEQ_CYCLES   8192
+#define HPF_CHARGE		   0.996f
+#define MIX_NORM		   (1.0f / 480.0f)
+#define OUTPUT_GAIN		   1.5f
+#define WAVE_TRIGGER_DELAY 6
 
 #define ADDR_NR10 0xFF10
 #define ADDR_NR50 0xFF24
@@ -15,7 +16,7 @@
 
 #define R_NR10 0x00
 #define R_NR32 0x0C
-#define R_NR43 0x13
+#define R_NR43 0x12
 #define R_NR50 0x14
 #define R_NR51 0x15
 
@@ -177,6 +178,9 @@ static void advance(Apu *a, unsigned i) {
 			lfsr_clock(a);
 		} else {
 			c->pos = (uint8_t)((c->pos + 1) & (i == 2 ? 31 : 7));
+			if (i == 2) {
+				a->wave_access = true;
+			}
 		}
 	}
 }
@@ -249,8 +253,22 @@ static void emit(Apu *a) {
 	}
 }
 
+static void wave_trigger_corruption(Apu *a) {
+	unsigned idx = a->ch[2].pos >> 1;
+
+	if (idx < 4) {
+		a->wave[0] = a->wave[idx];
+	} else {
+		memcpy(a->wave, &a->wave[idx & ~3u], 4);
+	}
+}
+
 static void trigger(Apu *a, unsigned i) {
 	ApuChannel *c = &a->ch[i];
+
+	if (i == 2 && c->on && a->wave_access) {
+		wave_trigger_corruption(a);
+	}
 
 	c->on = c->dac;
 	if (c->length == 0) {
@@ -259,7 +277,7 @@ static void trigger(Apu *a, unsigned i) {
 			c->length--;
 		}
 	}
-	c->timer = period(a, i);
+	c->timer = period(a, i) + (i == 2 ? WAVE_TRIGGER_DELAY : 0);
 
 	if (i != 2) {
 		c->volume = a->reg[i * 5 + 2] >> 4;
@@ -319,8 +337,27 @@ static void power_on(Apu *a) {
 	a->fs_cycles = 0;
 }
 
-static unsigned wave_index(const Apu *a, uint16_t addr) {
-	return a->ch[2].on ? (unsigned)(a->ch[2].pos >> 1) : (unsigned)(addr - ADDR_WAVE);
+static void envelope_write(ApuChannel *c, uint8_t value) {
+	bool up = value & 8;
+
+	if (c->on) {
+		if (!c->env_period) {
+			c->volume++;
+		} else if (!c->env_up) {
+			c->volume += 2;
+		}
+		if (up != c->env_up) {
+			c->volume = (uint8_t)(16 - c->volume);
+		}
+		c->volume &= 15;
+	}
+
+	c->env_period = value & 7;
+	c->env_up = up;
+	c->dac = (value & 0xF8) != 0;
+	if (!c->dac) {
+		c->on = false;
+	}
 }
 
 void apu_reset(Apu *a) {
@@ -332,10 +369,15 @@ void apu_reset(Apu *a) {
 	for (size_t i = 0; i < sizeof BOOT / sizeof *BOOT; i++) {
 		apu_write(a, BOOT[i].addr, BOOT[i].value);
 	}
+
+	a->ch[0].on = true;
+	a->ch[0].volume = 0;
 }
 
 void apu_step(Apu *a, int cycles) {
 	for (int n = 0; n < cycles; n += 4) {
+		a->wave_access = false;
+
 		if (a->power) {
 			a->fs_cycles += 4;
 			if (a->fs_cycles >= FRAME_SEQ_CYCLES) {
@@ -360,7 +402,10 @@ void apu_step(Apu *a, int cycles) {
 
 uint8_t apu_read(const Apu *a, uint16_t addr) {
 	if (addr >= ADDR_WAVE) {
-		return a->wave[wave_index(a, addr)];
+		if (a->ch[2].on) {
+			return a->wave_access ? a->wave[a->ch[2].pos >> 1] : 0xFF;
+		}
+		return a->wave[addr - ADDR_WAVE];
 	}
 	if (addr > ADDR_NR52) {
 		return 0xFF;
@@ -379,7 +424,11 @@ uint8_t apu_read(const Apu *a, uint16_t addr) {
 
 void apu_write(Apu *a, uint16_t addr, uint8_t value) {
 	if (addr >= ADDR_WAVE) {
-		a->wave[wave_index(a, addr)] = value;
+		if (!a->ch[2].on) {
+			a->wave[addr - ADDR_WAVE] = value;
+		} else if (a->wave_access) {
+			a->wave[a->ch[2].pos >> 1] = value;
+		}
 		return;
 	}
 	if (addr == ADDR_NR52) {
@@ -393,6 +442,7 @@ void apu_write(Apu *a, uint16_t addr, uint8_t value) {
 	if (addr < ADDR_NR10 || addr > 0xFF25) {
 		return;
 	}
+
 	if (!a->power) {
 		unsigned off = addr - ADDR_NR10;
 
@@ -404,6 +454,7 @@ void apu_write(Apu *a, uint16_t addr, uint8_t value) {
 		}
 		return;
 	}
+
 	a->reg[addr - ADDR_NR10] = value;
 	if (addr >= ADDR_NR50) {
 		return;
@@ -432,12 +483,7 @@ void apu_write(Apu *a, uint16_t addr, uint8_t value) {
 		break;
 	case 2:
 		if (i != 2) {
-			c->env_period = value & 7;
-			c->env_up = value & 8;
-			c->dac = (value & 0xF8) != 0;
-			if (!c->dac) {
-				c->on = false;
-			}
+			envelope_write(c, value);
 		}
 		break;
 	case 3:

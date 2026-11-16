@@ -8,7 +8,8 @@
 #define LINES_PER_FRAME		 154
 #define DOTS_PER_FRAME		 (DOTS_PER_LINE * LINES_PER_FRAME)
 #define OAM_SCAN_DOTS		 80
-#define DRAW_END_DOTS		 252
+#define DRAW_BASE_DOTS		 172
+#define DRAW_END_DEFAULT	 (OAM_SCAN_DOTS + DRAW_BASE_DOTS)
 #define OAM_ENTRIES			 40
 #define MAX_SPRITES_PER_LINE 10
 
@@ -67,6 +68,19 @@ static void clear_screen(Ppu *p) {
 	}
 }
 
+static unsigned scan_sprites(const Ppu *p, uint8_t *found) {
+	int height = (p->lcdc & LCDC_OBJ_TALL) ? 16 : 8;
+	unsigned count = 0;
+
+	for (unsigned i = 0; i < OAM_ENTRIES && count < MAX_SPRITES_PER_LINE; i++) {
+		int line = p->ly - (p->oam[i * 4] - 16);
+		if (line >= 0 && line < height) {
+			found[count++] = (uint8_t)i;
+		}
+	}
+	return count;
+}
+
 static unsigned tile_pixel(const Ppu *p, unsigned map, unsigned x, unsigned y) {
 	uint8_t tile = p->vram[map + (y >> 3) * 32 + (x >> 3)];
 	unsigned addr =
@@ -91,9 +105,13 @@ static void render_background(const Ppu *p, uint8_t *bg_id) {
 	}
 }
 
+static bool window_visible(const Ppu *p) {
+	return (p->lcdc & LCDC_WIN_ENABLE) && (p->lcdc & LCDC_BG_ENABLE) && p->ly >= p->wy &&
+		   p->wx <= 166;
+}
+
 static void render_window(Ppu *p, uint8_t *bg_id) {
-	if (!(p->lcdc & LCDC_WIN_ENABLE) || !(p->lcdc & LCDC_BG_ENABLE) || p->ly < p->wy ||
-		p->wx > 166) {
+	if (!window_visible(p)) {
 		return;
 	}
 
@@ -113,14 +131,7 @@ static void render_sprites(const Ppu *p, const uint8_t *bg_id, uint32_t *row) {
 
 	int height = (p->lcdc & LCDC_OBJ_TALL) ? 16 : 8;
 	uint8_t found[MAX_SPRITES_PER_LINE];
-	unsigned count = 0;
-
-	for (unsigned i = 0; i < OAM_ENTRIES && count < MAX_SPRITES_PER_LINE; i++) {
-		int line = p->ly - (p->oam[i * 4] - 16);
-		if (line >= 0 && line < height) {
-			found[count++] = (uint8_t)i;
-		}
-	}
+	unsigned count = scan_sprites(p, found);
 
 	for (unsigned i = 1; i < count; i++) {
 		uint8_t cur = found[i];
@@ -188,11 +199,36 @@ static void render_line(Ppu *p) {
 	render_sprites(p, bg_id, row);
 }
 
+static unsigned draw_end_for_line(const Ppu *p) {
+	unsigned dots = OAM_SCAN_DOTS + DRAW_BASE_DOTS + (p->scx & 7);
+
+	if (p->lcdc & LCDC_OBJ_ENABLE) {
+		uint8_t found[MAX_SPRITES_PER_LINE];
+		unsigned count = scan_sprites(p, found);
+
+		for (unsigned i = 0; i < count; i++) {
+			unsigned x = p->oam[found[i] * 4 + 1];
+			if (x < 168) {
+				unsigned off = (x + p->scx) & 7;
+				dots += 11 - (off < 5 ? off : 5);
+			}
+		}
+	}
+	if (window_visible(p)) {
+		dots += 6;
+	}
+	return dots;
+}
+
+static bool stat_line_now(const Ppu *p) {
+	return lcd_on(p) && (((p->stat & STAT_INT_HBLANK) && p->mode == MODE_HBLANK) ||
+						 ((p->stat & STAT_INT_VBLANK) && p->mode == MODE_VBLANK) ||
+						 ((p->stat & STAT_INT_OAM) && p->mode == MODE_OAM) ||
+						 ((p->stat & STAT_INT_LYC) && p->ly == p->lyc));
+}
+
 static bool stat_edge(Ppu *p) {
-	bool line = lcd_on(p) && (((p->stat & STAT_INT_HBLANK) && p->mode == MODE_HBLANK) ||
-							  ((p->stat & STAT_INT_VBLANK) && p->mode == MODE_VBLANK) ||
-							  ((p->stat & STAT_INT_OAM) && p->mode == MODE_OAM) ||
-							  ((p->stat & STAT_INT_LYC) && p->ly == p->lyc));
+	bool line = stat_line_now(p);
 	bool rising = line && !p->stat_line;
 
 	p->stat_line = line;
@@ -215,11 +251,15 @@ static unsigned advance(Ppu *p) {
 		}
 	}
 
+	if (p->ly < PPU_H && p->dot == OAM_SCAN_DOTS) {
+		p->draw_end = (uint16_t)draw_end_for_line(p);
+	}
+
 	if (p->ly >= PPU_H) {
 		p->mode = MODE_VBLANK;
 	} else if (p->dot < OAM_SCAN_DOTS) {
 		p->mode = MODE_OAM;
-	} else if (p->dot < DRAW_END_DOTS) {
+	} else if (p->dot < p->draw_end) {
 		p->mode = MODE_DRAW;
 	} else {
 		p->mode = MODE_HBLANK;
@@ -241,6 +281,7 @@ void ppu_reset(Ppu *p) {
 	p->obp0 = 0xFF;
 	p->obp1 = 0xFF;
 	p->mode = MODE_HBLANK;
+	p->draw_end = DRAW_END_DEFAULT;
 	clear_screen(p);
 }
 
@@ -310,17 +351,21 @@ static void lcdc_write(Ppu *p, uint8_t value) {
 	p->mode = MODE_HBLANK;
 	p->window_line = 0;
 	p->off_dots = 0;
+	p->draw_end = DRAW_END_DEFAULT;
 	if (!lcd_on(p)) {
 		clear_screen(p);
 	}
 }
 
 unsigned ppu_write(Ppu *p, uint16_t addr, uint8_t value) {
+	bool spurious = false;
+
 	switch (addr) {
 	case REG_LCDC:
 		lcdc_write(p, value);
 		break;
 	case REG_STAT:
+		spurious = lcd_on(p) && !p->stat_line && (p->mode < MODE_OAM || p->ly == p->lyc);
 		p->stat = value & STAT_WRITABLE;
 		break;
 	case REG_SCY:
@@ -350,7 +395,7 @@ unsigned ppu_write(Ppu *p, uint16_t addr, uint8_t value) {
 	default:
 		break;
 	}
-	return stat_edge(p) ? PPU_IRQ_STAT : 0;
+	return (stat_edge(p) || spurious) ? PPU_IRQ_STAT : 0;
 }
 
 static bool vram_open(const Ppu *p) {

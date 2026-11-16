@@ -29,17 +29,18 @@ static uint8_t flags(bool z, bool n, bool h, bool cy) {
 }
 
 static void tick(Cpu *cpu) {
-	cpu->cycles += 4;
+	gb_tick(cpu->gb);
 }
 
 static uint8_t rd(Cpu *cpu, uint16_t addr) {
+	uint8_t value = bus_read(cpu->gb, addr);
 	tick(cpu);
-	return bus_read(cpu->gb, addr);
+	return value;
 }
 
 static void wr(Cpu *cpu, uint16_t addr, uint8_t value) {
-	tick(cpu);
 	bus_write(cpu->gb, addr, value);
+	tick(cpu);
 }
 
 static uint8_t fetch8(Cpu *cpu) {
@@ -321,6 +322,8 @@ static void exec_x0(Cpu *cpu, unsigned y, unsigned z) {
 		}
 		case 2:
 			fetch8(cpu);
+			bus_write(cpu->gb, 0xFF04, 0);
+			cpu->stopped = true;
 			break;
 		case 3:
 			jr(cpu, true);
@@ -548,19 +551,26 @@ static void exec(Cpu *cpu) {
 	}
 }
 
-static void service_interrupt(Cpu *cpu, uint8_t pending) {
-	unsigned bit = 0;
-	while (!((pending >> bit) & 1)) {
-		bit++;
-	}
-
+static void service_interrupt(Cpu *cpu) {
 	cpu->ime = false;
 	cpu->ei_delay = 0;
 	tick(cpu);
 	tick(cpu);
-	push16(cpu, cpu->pc);
-	bus_write(cpu->gb, ADDR_IF, bus_read(cpu->gb, ADDR_IF) & ~(1u << bit));
-	cpu->pc = (uint16_t)(0x40 + bit * 8);
+	wr(cpu, --cpu->sp, cpu->pc >> 8);
+
+	uint8_t pending = bus_read(cpu->gb, ADDR_IE) & bus_read(cpu->gb, ADDR_IF) & IRQ_MASK;
+	wr(cpu, --cpu->sp, cpu->pc & 0xFF);
+
+	if (pending) {
+		unsigned bit = 0;
+		while (!((pending >> bit) & 1)) {
+			bit++;
+		}
+		bus_write(cpu->gb, ADDR_IF, bus_read(cpu->gb, ADDR_IF) & ~(1u << bit));
+		cpu->pc = (uint16_t)(0x40 + bit * 8);
+	} else {
+		cpu->pc = 0;
+	}
 	tick(cpu);
 }
 
@@ -575,25 +585,33 @@ void cpu_reset(Cpu *cpu, Gb *gb) {
 	cpu->pc = 0x0100;
 }
 
-int cpu_step(Cpu *cpu) {
-	cpu->cycles = 0;
-
+void cpu_step(Cpu *cpu) {
 	if (cpu->hung) {
-		return 4;
+		tick(cpu);
+		return;
 	}
 
 	uint8_t pending = bus_read(cpu->gb, ADDR_IE) & bus_read(cpu->gb, ADDR_IF) & IRQ_MASK;
 
+	if (cpu->stopped) {
+		if (!(bus_read(cpu->gb, ADDR_IF) & 0x10)) {
+			tick(cpu);
+			return;
+		}
+		cpu->stopped = false;
+	}
+
 	if (cpu->halted) {
 		if (!pending) {
-			return 4;
+			tick(cpu);
+			return;
 		}
 		cpu->halted = false;
 	}
 
 	if (cpu->ime && pending) {
-		service_interrupt(cpu, pending);
-		return (int)cpu->cycles;
+		service_interrupt(cpu);
+		return;
 	}
 
 	exec(cpu);
@@ -601,5 +619,4 @@ int cpu_step(Cpu *cpu) {
 	if (cpu->ei_delay && --cpu->ei_delay == 0) {
 		cpu->ime = true;
 	}
-	return (int)cpu->cycles;
 }

@@ -30,12 +30,12 @@ typedef struct {
 	bool halted;
 	bool halt_bug;
 	bool hung;
+	bool stopped;
 	uint8_t ei_delay;
-	unsigned cycles;
 	Gb *gb;
 } Cpu;
 
 void cpu_reset(Cpu *cpu, Gb *gb);
-int cpu_step(Cpu *cpu);
+void cpu_step(Cpu *cpu);
 
 #endif

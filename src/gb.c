@@ -2,13 +2,13 @@
 
 #include <string.h>
 
-#define ADDR_IF 0xFF0F
+#define ADDR_IF	  0xFF0F
+#define OAM_BYTES 160
 
 static const struct {
 	uint8_t reg;
 	uint8_t value;
 } IO_DEFAULTS[] = {
-	{0x02, 0x7E},
 	{0x0F, 0xE1},
 	{0x46, 0xFF},
 };
@@ -19,6 +19,7 @@ void gb_init(Gb *gb, Cartridge *cart) {
 
 	timer_reset(&gb->timer);
 	joypad_reset(&gb->joypad);
+	serial_reset(&gb->serial);
 	ppu_reset(&gb->ppu);
 	apu_reset(&gb->apu);
 	cpu_reset(&gb->cpu, gb);
@@ -41,17 +42,58 @@ void gb_request_ppu_irqs(Gb *gb, unsigned mask) {
 	}
 }
 
-static void tick(Gb *gb, int cycles) {
-	if (timer_step(&gb->timer, cycles)) {
+void gb_dma_start(Gb *gb, uint8_t value) {
+	gb->dma = (Dma){.active = true, .delay = 2, .pos = 0, .src = (uint16_t)(value << 8)};
+}
+
+static uint8_t dma_read(const Gb *gb, uint16_t addr) {
+	if (addr >= 0xE000) {
+		addr -= 0x2000;
+	}
+	if (addr < 0x8000) {
+		return cartridge_read_rom(gb->cart, addr);
+	}
+	if (addr < 0xA000) {
+		return gb->ppu.vram[addr & 0x1FFF];
+	}
+	if (addr < 0xC000) {
+		return cartridge_read_ram(gb->cart, addr);
+	}
+	return gb->wram[addr & 0x1FFF];
+}
+
+static void dma_tick(Gb *gb) {
+	Dma *d = &gb->dma;
+
+	if (!d->active) {
+		return;
+	}
+	if (d->delay) {
+		d->delay--;
+		return;
+	}
+
+	gb->ppu.oam[d->pos] = dma_read(gb, (uint16_t)(d->src + d->pos));
+	if (++d->pos == OAM_BYTES) {
+		d->active = false;
+	}
+}
+
+void gb_tick(Gb *gb) {
+	if (timer_step(&gb->timer)) {
 		gb_request_irq(gb, IRQ_TIMER);
 	}
-	gb_request_ppu_irqs(gb, ppu_step(&gb->ppu, cycles));
-	apu_step(&gb->apu, cycles);
+	if (serial_step(&gb->serial)) {
+		gb_request_irq(gb, IRQ_SERIAL);
+	}
+	gb_request_ppu_irqs(gb, ppu_step(&gb->ppu, 4));
+	apu_step(&gb->apu, 4);
+	dma_tick(gb);
 }
 
 void gb_run_frame(Gb *gb) {
 	do {
-		tick(gb, cpu_step(&gb->cpu));
+		cpu_step(&gb->cpu);
 	} while (!ppu_take_frame(&gb->ppu));
 }
 

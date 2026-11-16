@@ -1,7 +1,5 @@
 #include "bus.h"
 
-#include <stdio.h>
-
 #define ADDR_JOYP 0xFF00
 #define ADDR_SB	  0xFF01
 #define ADDR_SC	  0xFF02
@@ -16,9 +14,20 @@ static bool is_apu_reg(uint16_t addr) {
 	return addr >= 0xFF10 && addr <= 0xFF3F;
 }
 
+static bool is_serial_reg(uint16_t addr) {
+	return addr == ADDR_SB || addr == ADDR_SC;
+}
+
+static bool dma_blocks(const Gb *gb, uint16_t addr) {
+	return gb->dma.active && gb->dma.delay == 0 && addr < 0xFF00;
+}
+
 static uint8_t io_read(const Gb *gb, uint16_t addr) {
 	if (addr == ADDR_JOYP) {
 		return joypad_read(&gb->joypad);
+	}
+	if (is_serial_reg(addr)) {
+		return serial_read(&gb->serial, addr);
 	}
 	if (addr >= 0xFF04 && addr <= 0xFF07) {
 		return timer_read(&gb->timer, addr);
@@ -43,10 +52,13 @@ static void io_write(Gb *gb, uint16_t addr, uint8_t value) {
 		return;
 	}
 
+	if (is_serial_reg(addr)) {
+		serial_write(&gb->serial, addr, value);
+		return;
+	}
+
 	if (addr >= 0xFF04 && addr <= 0xFF07) {
-		if (timer_write(&gb->timer, addr, value)) {
-			gb_request_irq(gb, IRQ_TIMER);
-		}
+		timer_write(&gb->timer, addr, value);
 		return;
 	}
 
@@ -60,20 +72,16 @@ static void io_write(Gb *gb, uint16_t addr, uint8_t value) {
 		return;
 	}
 
-	if (addr == ADDR_SC && (value & 0x81) == 0x81) {
-		putchar(gb->io[ADDR_SB - 0xFF00]);
-		fflush(stdout);
-		value &= 0x7F;
-		gb_request_irq(gb, IRQ_SERIAL);
-	} else if (addr == ADDR_DMA) {
-		for (uint16_t i = 0; i < sizeof gb->ppu.oam; i++) {
-			gb->ppu.oam[i] = bus_read(gb, (uint16_t)((value << 8) + i));
-		}
+	if (addr == ADDR_DMA) {
+		gb_dma_start(gb, value);
 	}
 	gb->io[addr - 0xFF00] = value;
 }
 
 uint8_t bus_read(const Gb *gb, uint16_t addr) {
+	if (dma_blocks(gb, addr)) {
+		return 0xFF;
+	}
 	if (addr < 0x8000) {
 		return cartridge_read_rom(gb->cart, addr);
 	}
@@ -102,6 +110,9 @@ uint8_t bus_read(const Gb *gb, uint16_t addr) {
 }
 
 void bus_write(Gb *gb, uint16_t addr, uint8_t value) {
+	if (dma_blocks(gb, addr)) {
+		return;
+	}
 	if (addr < 0x8000) {
 		cartridge_write_rom(gb->cart, addr, value);
 	} else if (addr < 0xA000) {
