@@ -34,12 +34,12 @@ static void tick(Cpu *cpu) {
 
 static uint8_t rd(Cpu *cpu, uint16_t addr) {
 	tick(cpu);
-	return bus_read(addr);
+	return bus_read(cpu->gb, addr);
 }
 
 static void wr(Cpu *cpu, uint16_t addr, uint8_t value) {
 	tick(cpu);
-	bus_write(addr, value);
+	bus_write(cpu->gb, addr, value);
 }
 
 static uint8_t fetch8(Cpu *cpu) {
@@ -273,7 +273,7 @@ static void ret(Cpu *cpu, bool take) {
 }
 
 static void halt(Cpu *cpu) {
-	bool pending = bus_read(ADDR_IE) & bus_read(ADDR_IF) & IRQ_MASK;
+	bool pending = bus_read(cpu->gb, ADDR_IE) & bus_read(cpu->gb, ADDR_IF) & IRQ_MASK;
 	if (!cpu->ime && pending) {
 		cpu->halt_bug = true;
 	} else {
@@ -559,13 +559,14 @@ static void service_interrupt(Cpu *cpu, uint8_t pending) {
 	tick(cpu);
 	tick(cpu);
 	push16(cpu, cpu->pc);
-	bus_write(ADDR_IF, bus_read(ADDR_IF) & ~(1u << bit));
+	bus_write(cpu->gb, ADDR_IF, bus_read(cpu->gb, ADDR_IF) & ~(1u << bit));
 	cpu->pc = (uint16_t)(0x40 + bit * 8);
 	tick(cpu);
 }
 
-void cpu_reset(Cpu *cpu) {
+void cpu_reset(Cpu *cpu, Gb *gb) {
 	*cpu = (Cpu){0};
+	cpu->gb = gb;
 	cpu->af = 0x01B0;
 	cpu->bc = 0x0013;
 	cpu->de = 0x00D8;
@@ -581,7 +582,7 @@ int cpu_step(Cpu *cpu) {
 		return 4;
 	}
 
-	uint8_t pending = bus_read(ADDR_IE) & bus_read(ADDR_IF) & IRQ_MASK;
+	uint8_t pending = bus_read(cpu->gb, ADDR_IE) & bus_read(cpu->gb, ADDR_IF) & IRQ_MASK;
 
 	if (cpu->halted) {
 		if (!pending) {

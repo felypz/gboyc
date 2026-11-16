@@ -17,6 +17,8 @@
 		uint16_t pair;                                                                             \
 	}
 
+typedef struct Gb Gb;
+
 typedef struct {
 	CPU_REG_PAIR(a, f, af);
 	CPU_REG_PAIR(b, c, bc);
@@ -30,9 +32,10 @@ typedef struct {
 	bool hung;
 	uint8_t ei_delay;
 	unsigned cycles;
+	Gb *gb;
 } Cpu;
 
-void cpu_reset(Cpu *cpu);
+void cpu_reset(Cpu *cpu, Gb *gb);
 int cpu_step(Cpu *cpu);
 
 #endif

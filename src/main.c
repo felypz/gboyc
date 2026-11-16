@@ -1,9 +1,8 @@
 #include <stdio.h>
 #include <stdlib.h>
 
-#include "bus.h"
 #include "cartridge.h"
-#include "cpu.h"
+#include "gb.h"
 #include "platform.h"
 #include "ui.h"
 
@@ -15,12 +14,13 @@ typedef enum {
 } AppState;
 
 static Ui ui;
-static Cpu cpu;
+static Gb gb;
 static Cartridge *cart;
 
 static void unload_game(void) {
 	cartridge_free(cart);
 	cart = NULL;
+	gb.cart = NULL;
 }
 
 static bool start_game(const char *path) {
@@ -31,21 +31,14 @@ static bool start_game(const char *path) {
 		return false;
 	}
 
-	bus_init(cart);
-	cpu_reset(&cpu);
+	gb_init(&gb, cart);
 	printf("ROM loaded: %s\n", cartridge_title(cart));
 	return true;
 }
 
-static void run_frame(void) {
-	do {
-		bus_tick(cpu_step(&cpu));
-	} while (!bus_frame_ready());
-}
-
 static void push_audio(Platform *plat) {
 	const float *samples;
-	size_t frames = bus_take_audio(&samples);
+	size_t frames = gb_take_audio(&gb, &samples);
 
 	platform_audio_push(plat, samples, frames);
 }
@@ -95,9 +88,9 @@ int main(void) {
 		if (state == APP_MENU) {
 			ui_draw(&ui, plat);
 		} else {
-			bus_set_joypad(platform_joypad(plat));
-			run_frame();
-			platform_present(plat, bus_framebuffer());
+			gb_set_joypad(&gb, platform_joypad(plat));
+			gb_run_frame(&gb);
+			platform_present(plat, gb_framebuffer(&gb));
 			push_audio(plat);
 			if (++frames % AUTOSAVE_FRAMES == 0) {
 				cartridge_save(cart);
