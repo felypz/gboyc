@@ -360,11 +360,14 @@ static void envelope_write(ApuChannel *c, uint8_t value) {
 	}
 }
 
-void apu_reset(Apu *a) {
+void apu_reset(Apu *a, bool boot) {
 	memset(a, 0, sizeof *a);
 	memcpy(a->wave, WAVE_DEFAULT, sizeof a->wave);
 	a->sweep_timer = 8;
 	a->lfsr = 0x7FFF;
+	if (boot) {
+		return;
+	}
 
 	for (size_t i = 0; i < sizeof BOOT / sizeof *BOOT; i++) {
 		apu_write(a, BOOT[i].addr, BOOT[i].value);

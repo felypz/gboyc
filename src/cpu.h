@@ -35,7 +35,7 @@ typedef struct {
 	Gb *gb;
 } Cpu;
 
-void cpu_reset(Cpu *cpu, Gb *gb);
+void cpu_reset(Cpu *cpu, Gb *gb, bool boot);
 void cpu_step(Cpu *cpu);
 
 #endif

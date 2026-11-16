@@ -5,6 +5,7 @@
 #define ADDR_SC	  0xFF02
 #define ADDR_IF	  0xFF0F
 #define ADDR_DMA  0xFF46
+#define ADDR_BOOT 0xFF50
 
 static bool is_ppu_reg(uint16_t addr) {
 	return addr >= 0xFF40 && addr <= 0xFF4B && addr != ADDR_DMA;
@@ -23,6 +24,9 @@ static bool dma_blocks(const Gb *gb, uint16_t addr) {
 }
 
 static uint8_t io_read(const Gb *gb, uint16_t addr) {
+	if (addr == ADDR_BOOT) {
+		return 0xFF;
+	}
 	if (addr == ADDR_JOYP) {
 		return joypad_read(&gb->joypad);
 	}
@@ -51,27 +55,28 @@ static void io_write(Gb *gb, uint16_t addr, uint8_t value) {
 		}
 		return;
 	}
-
 	if (is_serial_reg(addr)) {
 		serial_write(&gb->serial, addr, value);
 		return;
 	}
-
 	if (addr >= 0xFF04 && addr <= 0xFF07) {
 		timer_write(&gb->timer, addr, value);
 		return;
 	}
-
 	if (is_apu_reg(addr)) {
 		apu_write(&gb->apu, addr, value);
 		return;
 	}
-
 	if (is_ppu_reg(addr)) {
 		gb_request_ppu_irqs(gb, ppu_write(&gb->ppu, addr, value));
 		return;
 	}
-
+	if (addr == ADDR_BOOT) {
+		if (value) {
+			gb->boot_on = false;
+		}
+		return;
+	}
 	if (addr == ADDR_DMA) {
 		gb_dma_start(gb, value);
 	}
@@ -81,6 +86,9 @@ static void io_write(Gb *gb, uint16_t addr, uint8_t value) {
 uint8_t bus_read(const Gb *gb, uint16_t addr) {
 	if (dma_blocks(gb, addr)) {
 		return 0xFF;
+	}
+	if (gb->boot_on && addr < BOOT_ROM_SIZE) {
+		return gb->boot_rom[addr];
 	}
 	if (addr < 0x8000) {
 		return cartridge_read_rom(gb->cart, addr);

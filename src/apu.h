@@ -46,7 +46,7 @@ typedef struct {
 	float samples[APU_BUFFER_FRAMES * 2];
 } Apu;
 
-void apu_reset(Apu *a);
+void apu_reset(Apu *a, bool boot);
 void apu_step(Apu *a, int cycles);
 uint8_t apu_read(const Apu *a, uint16_t addr);
 void apu_write(Apu *a, uint16_t addr, uint8_t value);

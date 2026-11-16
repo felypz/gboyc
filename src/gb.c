@@ -13,16 +13,29 @@ static const struct {
 	{0x46, 0xFF},
 };
 
-void gb_init(Gb *gb, Cartridge *cart) {
+void gb_init(Gb *gb, Cartridge *cart, const uint8_t *boot) {
+	bool has_boot = boot != NULL;
+
 	memset(gb, 0, sizeof *gb);
 	gb->cart = cart;
+	if (has_boot) {
+		memcpy(gb->boot_rom, boot, BOOT_ROM_SIZE);
+		gb->boot_on = true;
+	}
 
 	timer_reset(&gb->timer);
 	joypad_reset(&gb->joypad);
 	serial_reset(&gb->serial);
 	ppu_reset(&gb->ppu);
-	apu_reset(&gb->apu);
-	cpu_reset(&gb->cpu, gb);
+	apu_reset(&gb->apu, has_boot);
+	cpu_reset(&gb->cpu, gb, has_boot);
+
+	if (has_boot) {
+		gb->timer.div = 0;
+		gb->ppu.lcdc = 0;
+		gb->ppu.bgp = 0;
+		return;
+	}
 
 	for (size_t i = 0; i < sizeof IO_DEFAULTS / sizeof *IO_DEFAULTS; i++) {
 		gb->io[IO_DEFAULTS[i].reg] = IO_DEFAULTS[i].value;

@@ -1,6 +1,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 
+#include "boot.h"
 #include "cartridge.h"
 #include "gb.h"
 #include "platform.h"
@@ -31,7 +32,8 @@ static bool start_game(const char *path) {
 		return false;
 	}
 
-	gb_init(&gb, cart);
+	uint8_t boot[BOOT_ROM_SIZE];
+	gb_init(&gb, cart, boot_load(boot) ? boot : NULL);
 	printf("ROM loaded: %s\n", cartridge_title(cart));
 	return true;
 }

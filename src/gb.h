@@ -6,6 +6,7 @@
 #include <stdint.h>
 
 #include "apu.h"
+#include "boot.h"
 #include "cartridge.h"
 #include "cpu.h"
 #include "joypad.h"
@@ -35,13 +36,15 @@ typedef struct Gb {
 	Apu apu;
 	Dma dma;
 	Cartridge *cart;
+	uint8_t boot_rom[BOOT_ROM_SIZE];
+	bool boot_on;
 	uint8_t wram[0x2000];
 	uint8_t hram[0x7F];
 	uint8_t io[0x80];
 	uint8_t ie;
 } Gb;
 
-void gb_init(Gb *gb, Cartridge *cart);
+void gb_init(Gb *gb, Cartridge *cart, const uint8_t *boot);
 void gb_tick(Gb *gb);
 void gb_run_frame(Gb *gb);
 void gb_set_joypad(Gb *gb, uint8_t mask);

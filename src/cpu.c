@@ -574,9 +574,13 @@ static void service_interrupt(Cpu *cpu) {
 	tick(cpu);
 }
 
-void cpu_reset(Cpu *cpu, Gb *gb) {
+void cpu_reset(Cpu *cpu, Gb *gb, bool boot) {
 	*cpu = (Cpu){0};
 	cpu->gb = gb;
+	if (boot) {
+		return;
+	}
+
 	cpu->af = 0x01B0;
 	cpu->bc = 0x0013;
 	cpu->de = 0x00D8;
