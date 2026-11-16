@@ -34,6 +34,7 @@ Platform *platform_create(const char *title, int scale);
 void platform_destroy(Platform *p);
 
 bool platform_next_event(Platform *p, PlatformEvent *ev);
+uint8_t platform_joypad(const Platform *p);
 
 void platform_set_view(Platform *p, int w, int h);
 

@@ -5,6 +5,8 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "joypad.h"
+
 #define GB_FRAME_NS 16742706ULL
 
 enum { DIALOG_CHOSEN, DIALOG_CANCELED, DIALOG_FAILED };
@@ -19,14 +21,27 @@ struct Platform {
 	int view_h;
 };
 
-static void set_color(Platform *p, uint32_t argb)
-{
+static const struct {
+	SDL_Scancode key;
+	uint8_t button;
+} KEYMAP[] = {
+	{SDL_SCANCODE_RIGHT, JOY_RIGHT},
+	{SDL_SCANCODE_LEFT, JOY_LEFT},
+	{SDL_SCANCODE_UP, JOY_UP},
+	{SDL_SCANCODE_DOWN, JOY_DOWN},
+	{SDL_SCANCODE_Z, JOY_A},
+	{SDL_SCANCODE_X, JOY_B},
+	{SDL_SCANCODE_BACKSPACE, JOY_SELECT},
+	{SDL_SCANCODE_RSHIFT, JOY_SELECT},
+	{SDL_SCANCODE_RETURN, JOY_START},
+};
+
+static void set_color(Platform *p, uint32_t argb) {
 	SDL_SetRenderDrawColor(p->renderer, (argb >> 16) & 0xFF, (argb >> 8) & 0xFF, argb & 0xFF,
 						   (argb >> 24) & 0xFF);
 }
 
-Platform *platform_create(const char *title, int scale)
-{
+Platform *platform_create(const char *title, int scale) {
 	Platform *p = calloc(1, sizeof *p);
 	if (!p) {
 		return NULL;
@@ -74,8 +89,7 @@ fail:
 	return NULL;
 }
 
-void platform_destroy(Platform *p)
-{
+void platform_destroy(Platform *p) {
 	if (!p) {
 		return;
 	}
@@ -92,15 +106,13 @@ void platform_destroy(Platform *p)
 	free(p);
 }
 
-void platform_set_view(Platform *p, int w, int h)
-{
+void platform_set_view(Platform *p, int w, int h) {
 	SDL_SetRenderLogicalPresentation(p->renderer, w, h, SDL_LOGICAL_PRESENTATION_INTEGER_SCALE);
 	p->view_w = w;
 	p->view_h = h;
 }
 
-static bool map_key(SDL_Keycode key, PlatformEventType *type)
-{
+static bool map_key(SDL_Keycode key, PlatformEventType *type) {
 	switch (key) {
 	case SDLK_UP:
 		*type = PLATFORM_EV_UP;
@@ -121,8 +133,7 @@ static bool map_key(SDL_Keycode key, PlatformEventType *type)
 	}
 }
 
-bool platform_next_event(Platform *p, PlatformEvent *out)
-{
+bool platform_next_event(Platform *p, PlatformEvent *out) {
 	SDL_Event ev;
 
 	while (SDL_PollEvent(&ev)) {
@@ -163,8 +174,20 @@ bool platform_next_event(Platform *p, PlatformEvent *out)
 	return false;
 }
 
-static void SDLCALL on_file_dialog(void *userdata, const char *const *filelist, int filter)
-{
+uint8_t platform_joypad(const Platform *p) {
+	(void)p;
+	const bool *keys = SDL_GetKeyboardState(NULL);
+	uint8_t mask = 0;
+
+	for (size_t i = 0; i < SDL_arraysize(KEYMAP); i++) {
+		if (keys[KEYMAP[i].key]) {
+			mask |= KEYMAP[i].button;
+		}
+	}
+	return mask;
+}
+
+static void SDLCALL on_file_dialog(void *userdata, const char *const *filelist, int filter) {
 	(void)filter;
 
 	SDL_Event ev;
@@ -185,8 +208,7 @@ static void SDLCALL on_file_dialog(void *userdata, const char *const *filelist, 
 	}
 }
 
-void platform_open_file_dialog(Platform *p)
-{
+void platform_open_file_dialog(Platform *p) {
 	static const SDL_DialogFileFilter filters[] = {
 		{"Game Boy ROMs", "gb;gbc"},
 		{"All files", "*"},
@@ -196,41 +218,35 @@ void platform_open_file_dialog(Platform *p)
 						   SDL_arraysize(filters), NULL, false);
 }
 
-void platform_clear(Platform *p, uint32_t argb)
-{
+void platform_clear(Platform *p, uint32_t argb) {
 	set_color(p, argb);
 	SDL_RenderClear(p->renderer);
 }
 
-void platform_draw_text(Platform *p, int x, int y, int scale, uint32_t argb, const char *text)
-{
+void platform_draw_text(Platform *p, int x, int y, int scale, uint32_t argb, const char *text) {
 	set_color(p, argb);
 	SDL_SetRenderScale(p->renderer, (float)scale, (float)scale);
 	SDL_RenderDebugText(p->renderer, (float)x / scale, (float)y / scale, text);
 	SDL_SetRenderScale(p->renderer, 1.0f, 1.0f);
 }
 
-void platform_draw_text_centered(Platform *p, int y, int scale, uint32_t argb, const char *text)
-{
+void platform_draw_text_centered(Platform *p, int y, int scale, uint32_t argb, const char *text) {
 	int w = (int)strlen(text) * SDL_DEBUG_TEXT_FONT_CHARACTER_SIZE * scale;
 	platform_draw_text(p, (p->view_w - w) / 2, y, scale, argb, text);
 }
 
-void platform_flip(Platform *p)
-{
+void platform_flip(Platform *p) {
 	SDL_RenderPresent(p->renderer);
 }
 
-void platform_present(Platform *p, const uint32_t *framebuffer)
-{
+void platform_present(Platform *p, const uint32_t *framebuffer) {
 	SDL_UpdateTexture(p->texture, NULL, framebuffer, GB_SCREEN_W * (int)sizeof(uint32_t));
 	SDL_RenderClear(p->renderer);
 	SDL_RenderTexture(p->renderer, p->texture, NULL, NULL);
 	SDL_RenderPresent(p->renderer);
 }
 
-void platform_frame_limit(Platform *p)
-{
+void platform_frame_limit(Platform *p) {
 	uint64_t now = SDL_GetTicksNS();
 	if (p->next_frame_ns > now) {
 		SDL_DelayNS(p->next_frame_ns - now);
