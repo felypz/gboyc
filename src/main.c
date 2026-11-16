@@ -13,8 +13,7 @@ typedef enum {
 static uint32_t framebuffer[GB_SCREEN_W * GB_SCREEN_H];
 static Ui ui;
 
-static void draw_test_pattern(void)
-{
+static void draw_test_pattern(void) {
 	static const uint32_t palette[4] = {DMG_COLOR_0, DMG_COLOR_1, DMG_COLOR_2, DMG_COLOR_3};
 
 	for (int y = 0; y < GB_SCREEN_H; y++) {
@@ -24,8 +23,7 @@ static void draw_test_pattern(void)
 	}
 }
 
-int main(void)
-{
+int main(void) {
 	Platform *plat = platform_create("gboyc", 4);
 	if (!plat) {
 		return EXIT_FAILURE;
