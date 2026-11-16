@@ -1,12 +1,14 @@
 #ifndef GBOYC_CARTRIDGE_H
 #define GBOYC_CARTRIDGE_H
 
+#include <stdbool.h>
 #include <stdint.h>
 
 typedef struct Cartridge Cartridge;
 
 Cartridge *cartridge_load(const char *path);
 void cartridge_free(Cartridge *c);
+bool cartridge_save(Cartridge *c);
 
 const char *cartridge_title(const Cartridge *c);
 

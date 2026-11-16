@@ -7,6 +7,8 @@
 #include "platform.h"
 #include "ui.h"
 
+#define AUTOSAVE_FRAMES 300
+
 typedef enum {
 	APP_MENU,
 	APP_RUNNING,
@@ -16,14 +18,19 @@ static Ui ui;
 static Cpu cpu;
 static Cartridge *cart;
 
+static void unload_game(void) {
+	cartridge_free(cart);
+	cart = NULL;
+}
+
 static bool start_game(const char *path) {
-	Cartridge *loaded = cartridge_load(path);
-	if (!loaded) {
+	unload_game();
+
+	cart = cartridge_load(path);
+	if (!cart) {
 		return false;
 	}
 
-	cartridge_free(cart);
-	cart = loaded;
 	bus_init(cart);
 	cpu_reset(&cpu);
 	printf("ROM loaded: %s\n", cartridge_title(cart));
@@ -46,6 +53,7 @@ int main(void) {
 
 	AppState state = APP_MENU;
 	bool running = true;
+	unsigned frames = 0;
 
 	while (running) {
 		PlatformEvent ev;
@@ -68,6 +76,7 @@ int main(void) {
 			} else if (ev.type == PLATFORM_EV_QUIT) {
 				running = false;
 			} else if (ev.type == PLATFORM_EV_BACK) {
+				unload_game();
 				state = APP_MENU;
 				ui_init(&ui);
 				platform_set_view(plat, UI_VIEW_W, UI_VIEW_H);
@@ -80,11 +89,14 @@ int main(void) {
 			bus_set_joypad(platform_joypad(plat));
 			run_frame();
 			platform_present(plat, bus_framebuffer());
+			if (++frames % AUTOSAVE_FRAMES == 0) {
+				cartridge_save(cart);
+			}
 		}
 		platform_frame_limit(plat);
 	}
 
-	cartridge_free(cart);
+	unload_game();
 	platform_destroy(plat);
 	return EXIT_SUCCESS;
 }
