@@ -1,0 +1,9 @@
+.cache/
+build/
+
+*.d
+*.o
+*.gb
+*.gbc
+*.sav
+gboyc
