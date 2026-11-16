@@ -3,6 +3,7 @@
 #include <stdio.h>
 #include <string.h>
 
+#include "apu.h"
 #include "joypad.h"
 #include "ppu.h"
 #include "timer.h"
@@ -17,6 +18,7 @@ static Cartridge *cartridge;
 static Timer timer;
 static Joypad joypad;
 static Ppu ppu;
+static Apu apu;
 static uint8_t wram[0x2000];
 static uint8_t io[0x80];
 static uint8_t hram[0x7F];
@@ -26,13 +28,17 @@ static const struct {
 	uint8_t reg;
 	uint8_t value;
 } IO_DEFAULTS[] = {
-	{0x02, 0x7E}, {0x0F, 0xE1}, {0x10, 0x80}, {0x11, 0xBF}, {0x12, 0xF3}, {0x14, 0xBF},
-	{0x16, 0x3F}, {0x19, 0xBF}, {0x1A, 0x7F}, {0x1B, 0xFF}, {0x1C, 0x9F}, {0x1E, 0xBF},
-	{0x20, 0xFF}, {0x23, 0xBF}, {0x24, 0x77}, {0x25, 0xF3}, {0x26, 0xF1}, {0x46, 0xFF},
+	{0x02, 0x7E},
+	{0x0F, 0xE1},
+	{0x46, 0xFF},
 };
 
 static bool is_ppu_reg(uint16_t addr) {
 	return addr >= 0xFF40 && addr <= 0xFF4B && addr != ADDR_DMA;
+}
+
+static bool is_apu_reg(uint16_t addr) {
+	return addr >= 0xFF10 && addr <= 0xFF3F;
 }
 
 static void request_ppu_irqs(unsigned mask) {
@@ -53,6 +59,7 @@ void bus_init(Cartridge *cart) {
 	timer_reset(&timer);
 	joypad_reset(&joypad);
 	ppu_reset(&ppu);
+	apu_reset(&apu);
 
 	for (size_t i = 0; i < sizeof IO_DEFAULTS / sizeof *IO_DEFAULTS; i++) {
 		io[IO_DEFAULTS[i].reg] = IO_DEFAULTS[i].value;
@@ -68,6 +75,7 @@ void bus_tick(int cycles) {
 		bus_request_irq(IRQ_TIMER);
 	}
 	request_ppu_irqs(ppu_step(&ppu, cycles));
+	apu_step(&apu, cycles);
 }
 
 void bus_set_joypad(uint8_t mask) {
@@ -84,12 +92,19 @@ const uint32_t *bus_framebuffer(void) {
 	return ppu.framebuffer;
 }
 
+size_t bus_take_audio(const float **samples) {
+	return apu_take_samples(&apu, samples);
+}
+
 static uint8_t io_read(uint16_t addr) {
 	if (addr == ADDR_JOYP) {
 		return joypad_read(&joypad);
 	}
 	if (addr >= 0xFF04 && addr <= 0xFF07) {
 		return timer_read(&timer, addr);
+	}
+	if (is_apu_reg(addr)) {
+		return apu_read(&apu, addr);
 	}
 	if (is_ppu_reg(addr)) {
 		return ppu_read(&ppu, addr);
@@ -112,6 +127,11 @@ static void io_write(uint16_t addr, uint8_t value) {
 		if (timer_write(&timer, addr, value)) {
 			bus_request_irq(IRQ_TIMER);
 		}
+		return;
+	}
+
+	if (is_apu_reg(addr)) {
+		apu_write(&apu, addr, value);
 		return;
 	}
 

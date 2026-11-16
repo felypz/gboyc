@@ -43,6 +43,13 @@ static void run_frame(void) {
 	} while (!bus_frame_ready());
 }
 
+static void push_audio(Platform *plat) {
+	const float *samples;
+	size_t frames = bus_take_audio(&samples);
+
+	platform_audio_push(plat, samples, frames);
+}
+
 int main(void) {
 	Platform *plat = platform_create("gboyc", 4);
 	if (!plat) {
@@ -67,6 +74,7 @@ int main(void) {
 				case UI_ACTION_LOAD_ROM:
 					if (start_game(ui.rom_path)) {
 						state = APP_RUNNING;
+						platform_audio_clear(plat);
 						platform_set_view(plat, GB_SCREEN_W, GB_SCREEN_H);
 					}
 					break;
@@ -77,6 +85,7 @@ int main(void) {
 				running = false;
 			} else if (ev.type == PLATFORM_EV_BACK) {
 				unload_game();
+				platform_audio_clear(plat);
 				state = APP_MENU;
 				ui_init(&ui);
 				platform_set_view(plat, UI_VIEW_W, UI_VIEW_H);
@@ -89,6 +98,7 @@ int main(void) {
 			bus_set_joypad(platform_joypad(plat));
 			run_frame();
 			platform_present(plat, bus_framebuffer());
+			push_audio(plat);
 			if (++frames % AUTOSAVE_FRAMES == 0) {
 				cartridge_save(cart);
 			}

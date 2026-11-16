@@ -5,9 +5,14 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "apu.h"
 #include "joypad.h"
 
-#define GB_FRAME_NS 16742706ULL
+#define GB_FRAME_NS			   16742706ULL
+#define AUDIO_CHANNELS		   2
+#define AUDIO_FRAME_BYTES	   (AUDIO_CHANNELS * (int)sizeof(float))
+#define AUDIO_MAX_QUEUED_BYTES (APU_SAMPLE_RATE / 10 * AUDIO_FRAME_BYTES)
+#define AUDIO_PRIME_FRAMES	   1024
 
 enum { DIALOG_CHOSEN, DIALOG_CANCELED, DIALOG_FAILED };
 
@@ -15,6 +20,7 @@ struct Platform {
 	SDL_Window *window;
 	SDL_Renderer *renderer;
 	SDL_Texture *texture;
+	SDL_AudioStream *audio;
 	uint64_t next_frame_ns;
 	Uint32 dialog_event;
 	int view_w;
@@ -39,6 +45,21 @@ static const struct {
 static void set_color(Platform *p, uint32_t argb) {
 	SDL_SetRenderDrawColor(p->renderer, (argb >> 16) & 0xFF, (argb >> 8) & 0xFF, argb & 0xFF,
 						   (argb >> 24) & 0xFF);
+}
+
+static void audio_open(Platform *p) {
+	if (!SDL_InitSubSystem(SDL_INIT_AUDIO)) {
+		fprintf(stderr, "audio disabled: %s\n", SDL_GetError());
+		return;
+	}
+
+	SDL_AudioSpec spec = {SDL_AUDIO_F32, AUDIO_CHANNELS, APU_SAMPLE_RATE};
+	p->audio = SDL_OpenAudioDeviceStream(SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK, &spec, NULL, NULL);
+	if (!p->audio) {
+		fprintf(stderr, "audio disabled: %s\n", SDL_GetError());
+		return;
+	}
+	SDL_ResumeAudioStreamDevice(p->audio);
 }
 
 Platform *platform_create(const char *title, int scale) {
@@ -79,6 +100,7 @@ Platform *platform_create(const char *title, int scale) {
 	}
 	SDL_SetTextureScaleMode(p->texture, SDL_SCALEMODE_NEAREST);
 
+	audio_open(p);
 	platform_set_view(p, UI_VIEW_W, UI_VIEW_H);
 
 	p->next_frame_ns = SDL_GetTicksNS();
@@ -92,6 +114,9 @@ fail:
 void platform_destroy(Platform *p) {
 	if (!p) {
 		return;
+	}
+	if (p->audio) {
+		SDL_DestroyAudioStream(p->audio);
 	}
 	if (p->texture) {
 		SDL_DestroyTexture(p->texture);
@@ -244,6 +269,29 @@ void platform_present(Platform *p, const uint32_t *framebuffer) {
 	SDL_RenderClear(p->renderer);
 	SDL_RenderTexture(p->renderer, p->texture, NULL, NULL);
 	SDL_RenderPresent(p->renderer);
+}
+
+void platform_audio_push(Platform *p, const float *samples, size_t frames) {
+	if (!p->audio || !frames) {
+		return;
+	}
+
+	int queued = SDL_GetAudioStreamQueued(p->audio);
+	if (queued > AUDIO_MAX_QUEUED_BYTES) {
+		return;
+	}
+
+	if (queued == 0) {
+		static const float silence[AUDIO_PRIME_FRAMES * AUDIO_CHANNELS];
+		SDL_PutAudioStreamData(p->audio, silence, (int)sizeof silence);
+	}
+	SDL_PutAudioStreamData(p->audio, samples, (int)frames * AUDIO_FRAME_BYTES);
+}
+
+void platform_audio_clear(Platform *p) {
+	if (p->audio) {
+		SDL_ClearAudioStream(p->audio);
+	}
 }
 
 void platform_frame_limit(Platform *p) {

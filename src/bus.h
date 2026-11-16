@@ -2,6 +2,7 @@
 #define GBOYC_BUS_H
 
 #include <stdbool.h>
+#include <stddef.h>
 #include <stdint.h>
 
 #include "cartridge.h"
@@ -22,5 +23,6 @@ void bus_set_joypad(uint8_t mask);
 
 bool bus_frame_ready(void);
 const uint32_t *bus_framebuffer(void);
+size_t bus_take_audio(const float **samples);
 
 #endif

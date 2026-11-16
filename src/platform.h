@@ -2,6 +2,7 @@
 #define GBOYC_PLATFORM_H
 
 #include <stdbool.h>
+#include <stddef.h>
 #include <stdint.h>
 
 #define GB_SCREEN_W 160
@@ -46,6 +47,9 @@ void platform_flip(Platform *p);
 void platform_open_file_dialog(Platform *p);
 
 void platform_present(Platform *p, const uint32_t *framebuffer);
+
+void platform_audio_push(Platform *p, const float *samples, size_t frames);
+void platform_audio_clear(Platform *p);
 
 void platform_frame_limit(Platform *p);
 
