@@ -4,6 +4,7 @@
 #include <string.h>
 
 #include "joypad.h"
+#include "ppu.h"
 #include "timer.h"
 
 #define ADDR_JOYP 0xFF00
@@ -15,9 +16,8 @@
 static Cartridge *cartridge;
 static Timer timer;
 static Joypad joypad;
-static uint8_t vram[0x2000];
+static Ppu ppu;
 static uint8_t wram[0x2000];
-static uint8_t oam[0xA0];
 static uint8_t io[0x80];
 static uint8_t hram[0x7F];
 static uint8_t ie;
@@ -28,20 +28,31 @@ static const struct {
 } IO_DEFAULTS[] = {
 	{0x02, 0x7E}, {0x0F, 0xE1}, {0x10, 0x80}, {0x11, 0xBF}, {0x12, 0xF3}, {0x14, 0xBF},
 	{0x16, 0x3F}, {0x19, 0xBF}, {0x1A, 0x7F}, {0x1B, 0xFF}, {0x1C, 0x9F}, {0x1E, 0xBF},
-	{0x20, 0xFF}, {0x23, 0xBF}, {0x24, 0x77}, {0x25, 0xF3}, {0x26, 0xF1}, {0x40, 0x91},
-	{0x41, 0x85}, {0x46, 0xFF}, {0x47, 0xFC}, {0x48, 0xFF}, {0x49, 0xFF},
+	{0x20, 0xFF}, {0x23, 0xBF}, {0x24, 0x77}, {0x25, 0xF3}, {0x26, 0xF1}, {0x46, 0xFF},
 };
+
+static bool is_ppu_reg(uint16_t addr) {
+	return addr >= 0xFF40 && addr <= 0xFF4B && addr != ADDR_DMA;
+}
+
+static void request_ppu_irqs(unsigned mask) {
+	if (mask & PPU_IRQ_VBLANK) {
+		bus_request_irq(IRQ_VBLANK);
+	}
+	if (mask & PPU_IRQ_STAT) {
+		bus_request_irq(IRQ_STAT);
+	}
+}
 
 void bus_init(Cartridge *cart) {
 	cartridge = cart;
-	memset(vram, 0, sizeof vram);
 	memset(wram, 0, sizeof wram);
-	memset(oam, 0, sizeof oam);
 	memset(io, 0, sizeof io);
 	memset(hram, 0, sizeof hram);
 	ie = 0;
 	timer_reset(&timer);
 	joypad_reset(&joypad);
+	ppu_reset(&ppu);
 
 	for (size_t i = 0; i < sizeof IO_DEFAULTS / sizeof *IO_DEFAULTS; i++) {
 		io[IO_DEFAULTS[i].reg] = IO_DEFAULTS[i].value;
@@ -56,6 +67,7 @@ void bus_tick(int cycles) {
 	if (timer_step(&timer, cycles)) {
 		bus_request_irq(IRQ_TIMER);
 	}
+	request_ppu_irqs(ppu_step(&ppu, cycles));
 }
 
 void bus_set_joypad(uint8_t mask) {
@@ -64,12 +76,23 @@ void bus_set_joypad(uint8_t mask) {
 	}
 }
 
+bool bus_frame_ready(void) {
+	return ppu_take_frame(&ppu);
+}
+
+const uint32_t *bus_framebuffer(void) {
+	return ppu.framebuffer;
+}
+
 static uint8_t io_read(uint16_t addr) {
 	if (addr == ADDR_JOYP) {
 		return joypad_read(&joypad);
 	}
 	if (addr >= 0xFF04 && addr <= 0xFF07) {
 		return timer_read(&timer, addr);
+	}
+	if (is_ppu_reg(addr)) {
+		return ppu_read(&ppu, addr);
 	}
 	if (addr == ADDR_IF) {
 		return io[addr - 0xFF00] | 0xE0;
@@ -92,14 +115,19 @@ static void io_write(uint16_t addr, uint8_t value) {
 		return;
 	}
 
+	if (is_ppu_reg(addr)) {
+		request_ppu_irqs(ppu_write(&ppu, addr, value));
+		return;
+	}
+
 	if (addr == ADDR_SC && (value & 0x81) == 0x81) {
 		putchar(io[ADDR_SB - 0xFF00]);
 		fflush(stdout);
 		value &= 0x7F;
 		bus_request_irq(IRQ_SERIAL);
 	} else if (addr == ADDR_DMA) {
-		for (uint16_t i = 0; i < sizeof oam; i++) {
-			oam[i] = bus_read((uint16_t)((value << 8) + i));
+		for (uint16_t i = 0; i < sizeof ppu.oam; i++) {
+			ppu.oam[i] = bus_read((uint16_t)((value << 8) + i));
 		}
 	}
 	io[addr - 0xFF00] = value;
@@ -110,7 +138,7 @@ uint8_t bus_read(uint16_t addr) {
 		return cartridge_read_rom(cartridge, addr);
 	}
 	if (addr < 0xA000) {
-		return vram[addr & 0x1FFF];
+		return ppu_read_vram(&ppu, addr);
 	}
 	if (addr < 0xC000) {
 		return cartridge_read_ram(cartridge, addr);
@@ -119,7 +147,7 @@ uint8_t bus_read(uint16_t addr) {
 		return wram[addr & 0x1FFF];
 	}
 	if (addr < 0xFEA0) {
-		return oam[addr - 0xFE00];
+		return ppu_read_oam(&ppu, addr - 0xFE00);
 	}
 	if (addr < 0xFF00) {
 		return 0xFF;
@@ -137,13 +165,13 @@ void bus_write(uint16_t addr, uint8_t value) {
 	if (addr < 0x8000) {
 		cartridge_write_rom(cartridge, addr, value);
 	} else if (addr < 0xA000) {
-		vram[addr & 0x1FFF] = value;
+		ppu_write_vram(&ppu, addr, value);
 	} else if (addr < 0xC000) {
 		cartridge_write_ram(cartridge, addr, value);
 	} else if (addr < 0xFE00) {
 		wram[addr & 0x1FFF] = value;
 	} else if (addr < 0xFEA0) {
-		oam[addr - 0xFE00] = value;
+		ppu_write_oam(&ppu, addr - 0xFE00, value);
 	} else if (addr >= 0xFFFF) {
 		ie = value;
 	} else if (addr >= 0xFF80) {
