@@ -1,303 +1,301 @@
-#include "cartridge.h"
-
-#include <stdint.h>
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
-
 #include "mapper.h"
 
-#define HDR_LOGO	  0x104
-#define HDR_LOGO_SIZE 0x30
-#define HDR_TITLE	  0x134
-#define HDR_TYPE	  0x147
-#define HDR_ROM_SIZE  0x148
-#define HDR_RAM_SIZE  0x149
-#define HDR_CHECKSUM  0x14D
-#define HDR_END		  0x150
+#define ROM_BANK_SIZE 0x4000
+#define RAM_BANK_SIZE 0x2000
 
-#define ROM_BANK_SIZE  0x4000
-#define ROM_FILE_MAX   0x800000
-#define SAVE_PATH_MAX  4112
-#define SAVE_RTC_BYTES 13
-#define MBC2_RAM_SIZE  512
+#define RTC_HALT 0x40
+#define RTC_CARRY 0x80
 
-struct Cartridge {
-	uint8_t *rom;
-	uint8_t *ram;
-	size_t rom_size;
-	size_t ram_size;
-	bool battery;
-	bool dirty;
-	Mapper map;
-	char title[17];
-	char save_path[SAVE_PATH_MAX];
-};
+#define HUC_IR 0x0E
 
-static const size_t RAM_SIZES[] = {0, 0x800, 0x2000, 0x8000, 0x20000, 0x10000};
+void rtc_update(Rtc *r) {
+	time_t now = time(NULL);
 
-static const struct {
-	uint8_t type;
-	MbcType mbc;
-	bool battery;
-	bool timer;
-	bool rumble;
-} TYPES[] = {
-	{0x00, MBC_NONE, false, false, false}, {0x08, MBC_NONE, false, false, false},
-	{0x09, MBC_NONE, true, false, false},  {0x01, MBC_1, false, false, false},
-	{0x02, MBC_1, false, false, false},	   {0x03, MBC_1, true, false, false},
-	{0x05, MBC_2, false, false, false},	   {0x06, MBC_2, true, false, false},
-	{0x0F, MBC_3, true, true, false},	   {0x10, MBC_3, true, true, false},
-	{0x11, MBC_3, false, false, false},	   {0x12, MBC_3, false, false, false},
-	{0x13, MBC_3, true, false, false},	   {0x19, MBC_5, false, false, false},
-	{0x1A, MBC_5, false, false, false},	   {0x1B, MBC_5, true, false, false},
-	{0x1C, MBC_5, false, false, true},	   {0x1D, MBC_5, false, false, true},
-	{0x1E, MBC_5, true, false, true},	   {0xFE, MBC_HUC3, true, false, false},
-	{0xFF, MBC_HUC1, true, false, false},
-};
-
-static bool read_file(const char *path, uint8_t **data, size_t *size) {
-	FILE *f = fopen(path, "rb");
-	if (!f) {
-		fprintf(stderr, "cartridge: cannot open '%s'\n", path);
-		return false;
+	if ((r->regs[4] & RTC_HALT) || now <= r->last) {
+		r->last = now;
+		return;
 	}
 
-	fseek(f, 0, SEEK_END);
-	long len = ftell(f);
-	rewind(f);
+	unsigned days = ((unsigned)(r->regs[4] & 1) << 8) | r->regs[3];
+	uint64_t total = r->regs[0] + r->regs[1] * 60ULL + r->regs[2] * 3600ULL + days * 86400ULL +
+					 (uint64_t)(now - r->last);
+	r->last = now;
 
-	if (len < HDR_END || len > ROM_FILE_MAX) {
-		fprintf(stderr, "cartridge: invalid file size (%ld bytes)\n", len);
-		fclose(f);
-		return false;
+	r->regs[0] = (uint8_t)(total % 60);
+	total /= 60;
+	r->regs[1] = (uint8_t)(total % 60);
+	total /= 60;
+	r->regs[2] = (uint8_t)(total % 24);
+	total /= 24;
+
+	uint8_t flags = r->regs[4] & (RTC_HALT | RTC_CARRY);
+	if (total >= 512) {
+		flags |= RTC_CARRY;
+		total %= 512;
 	}
-
-	*data = malloc((size_t)len);
-	if (!*data || fread(*data, 1, (size_t)len, f) != (size_t)len) {
-		fprintf(stderr, "cartridge: read error\n");
-		free(*data);
-		*data = NULL;
-		fclose(f);
-		return false;
-	}
-
-	fclose(f);
-	*size = (size_t)len;
-	return true;
+	r->regs[3] = (uint8_t)(total & 0xFF);
+	r->regs[4] = flags | (uint8_t)(total >> 8);
 }
 
-static bool detect_multicart(const Cartridge *c) {
-	if (c->rom_size < 0x100000) {
-		return false;
-	}
+static void rtc_write(Rtc *r, unsigned reg, uint8_t value) {
+	static const uint8_t masks[5] = {0x3F, 0x3F, 0x1F, 0xFF, 0xC1};
 
-	unsigned matches = 0;
-	for (unsigned bank = 0x10; bank <= 0x30; bank += 0x10) {
-		const uint8_t *logo = c->rom + (size_t)bank * ROM_BANK_SIZE + HDR_LOGO;
-		if (memcmp(logo, c->rom + HDR_LOGO, HDR_LOGO_SIZE) == 0) {
-			matches++;
+	rtc_update(r);
+	r->regs[reg] = value & masks[reg];
+}
+
+void mapper_reset(Mapper *m) {
+	m->ram_enabled = (m->type == MBC_NONE);
+	m->bank1 = 1;
+	m->rom_bank = 1;
+	m->rtc.last = time(NULL);
+}
+
+size_t mapper_rom_offset(const Mapper *m, uint16_t addr) {
+	unsigned bank;
+
+	switch (m->type) {
+	case MBC_1: {
+		unsigned shift = m->multicart ? 4 : 5;
+		unsigned mask = m->multicart ? 0x0F : 0x1F;
+
+		if (addr < ROM_BANK_SIZE) {
+			bank = m->mode ? (unsigned)m->bank2 << shift : 0;
+		} else {
+			bank = ((unsigned)m->bank2 << shift) | (m->bank1 & mask);
 		}
+		break;
 	}
-	return matches >= 2;
+	case MBC_NONE:
+		bank = addr >> 14;
+		break;
+	default:
+		bank = addr < ROM_BANK_SIZE ? 0 : m->rom_bank;
+		break;
+	}
+	return (size_t)bank * ROM_BANK_SIZE + (addr & (ROM_BANK_SIZE - 1));
 }
 
-static bool parse_header(Cartridge *c, size_t file_size) {
-	uint8_t sum = 0;
-	for (size_t i = HDR_TITLE; i < HDR_CHECKSUM; i++) {
-		sum = (uint8_t)(sum - c->rom[i] - 1);
+static void mbc1_write(Mapper *m, uint16_t addr, uint8_t value) {
+	switch (addr >> 13) {
+	case 0:
+		m->ram_enabled = (value & 0x0F) == 0x0A;
+		break;
+	case 1:
+		m->bank1 = value & 0x1F;
+		if (m->bank1 == 0) {
+			m->bank1 = 1;
+		}
+		break;
+	case 2:
+		m->bank2 = value & 0x03;
+		break;
+	default:
+		m->mode = value & 1;
+		break;
 	}
-	if (sum != c->rom[HDR_CHECKSUM]) {
-		fprintf(stderr, "cartridge: header checksum mismatch\n");
-		return false;
-	}
-
-	uint8_t rom_code = c->rom[HDR_ROM_SIZE];
-	if (rom_code > 8) {
-		fprintf(stderr, "cartridge: unsupported ROM size code 0x%02X\n", rom_code);
-		return false;
-	}
-	c->rom_size = (size_t)0x8000 << rom_code;
-	if (file_size < c->rom_size) {
-		fprintf(stderr, "cartridge: file is truncated\n");
-		return false;
-	}
-
-	uint8_t ram_code = c->rom[HDR_RAM_SIZE];
-	if (ram_code >= sizeof RAM_SIZES / sizeof *RAM_SIZES) {
-		fprintf(stderr, "cartridge: unsupported RAM size code 0x%02X\n", ram_code);
-		return false;
-	}
-	c->ram_size = RAM_SIZES[ram_code];
-
-	uint8_t type = c->rom[HDR_TYPE];
-	size_t i = 0;
-	while (i < sizeof TYPES / sizeof *TYPES && TYPES[i].type != type) {
-		i++;
-	}
-	if (i == sizeof TYPES / sizeof *TYPES) {
-		fprintf(stderr, "cartridge: unsupported cartridge type 0x%02X\n", type);
-		return false;
-	}
-
-	c->map.type = TYPES[i].mbc;
-	c->map.has_timer = TYPES[i].timer;
-	c->map.rumble = TYPES[i].rumble;
-	if (c->map.type == MBC_2) {
-		c->ram_size = MBC2_RAM_SIZE;
-	}
-	c->battery = TYPES[i].battery && (c->ram_size || c->map.has_timer);
-	c->map.multicart = c->map.type == MBC_1 && detect_multicart(c);
-
-	for (int j = 0; j < 16; j++) {
-		uint8_t ch = c->rom[HDR_TITLE + j];
-		c->title[j] = (ch >= 0x20 && ch < 0x7F) ? (char)ch : '\0';
-	}
-	return true;
 }
 
-static void make_save_path(Cartridge *c, const char *path) {
-	snprintf(c->save_path, sizeof c->save_path, "%s", path);
-
-	char *slash = strrchr(c->save_path, '/');
-	char *dot = strrchr(c->save_path, '.');
-	if (!dot || (slash && dot < slash)) {
-		dot = c->save_path + strlen(c->save_path);
-	}
-	snprintf(dot, sizeof c->save_path - (size_t)(dot - c->save_path), ".sav");
-}
-
-static void load_save(Cartridge *c) {
-	FILE *f = fopen(c->save_path, "rb");
-	if (!f) {
+static void mbc2_write(Mapper *m, uint16_t addr, uint8_t value) {
+	if (addr >= 0x4000) {
 		return;
 	}
-
-	if (c->ram_size && fread(c->ram, 1, c->ram_size, f) != c->ram_size) {
-		fprintf(stderr, "cartridge: save file is too short\n");
-		fclose(f);
-		return;
+	if (addr & 0x100) {
+		m->rom_bank = value & 0x0F;
+		if (m->rom_bank == 0) {
+			m->rom_bank = 1;
+		}
+	} else {
+		m->ram_enabled = (value & 0x0F) == 0x0A;
 	}
+}
 
-	if (c->map.has_timer) {
-		uint8_t buf[SAVE_RTC_BYTES];
-		if (fread(buf, 1, sizeof buf, f) == sizeof buf) {
-			uint64_t t = 0;
-			memcpy(c->map.rtc.regs, buf, sizeof c->map.rtc.regs);
-			for (int i = 0; i < 8; i++) {
-				t |= (uint64_t)buf[5 + i] << (8 * i);
+static void mbc3_write(Mapper *m, uint16_t addr, uint8_t value) {
+	switch (addr >> 13) {
+	case 0:
+		m->ram_enabled = (value & 0x0F) == 0x0A;
+		break;
+	case 1:
+		m->rom_bank = value & 0x7F;
+		if (m->rom_bank == 0) {
+			m->rom_bank = 1;
+		}
+		break;
+	case 2:
+		m->ram_bank = value & 0x0F;
+		break;
+	default:
+		if (m->has_timer && m->rtc.latch == 0 && value == 1) {
+			rtc_update(&m->rtc);
+			for (unsigned i = 0; i < 5; i++) {
+				m->rtc.latched[i] = m->rtc.regs[i];
 			}
-			c->map.rtc.last = (time_t)t;
 		}
+		m->rtc.latch = value;
+		break;
 	}
-
-	fclose(f);
-	printf("Save loaded: %s\n", c->save_path);
 }
 
-bool cartridge_save(Cartridge *c) {
-	if (!c || !c->battery || !c->dirty) {
+static void mbc5_write(Mapper *m, uint16_t addr, uint8_t value) {
+	switch (addr >> 12) {
+	case 0:
+	case 1:
+		m->ram_enabled = (value & 0x0F) == 0x0A;
+		break;
+	case 2:
+		m->rom_bank = (m->rom_bank & 0x100) | value;
+		break;
+	case 3:
+		m->rom_bank = (m->rom_bank & 0xFF) | ((unsigned)(value & 1) << 8);
+		break;
+	case 4:
+	case 5:
+		m->ram_bank = value & (m->rumble ? 0x07 : 0x0F);
+		break;
+	default:
+		break;
+	}
+}
+
+static void huc_write(Mapper *m, uint16_t addr, uint8_t value) {
+	switch (addr >> 13) {
+	case 0:
+		m->io_mode = value & 0x0F;
+		break;
+	case 1:
+		m->rom_bank = value & (m->type == MBC_HUC3 ? 0x7F : 0x3F);
+		break;
+	case 2:
+		m->ram_bank = value & 0x03;
+		break;
+	default:
+		break;
+	}
+}
+
+void mapper_write_rom(Mapper *m, uint16_t addr, uint8_t value) {
+	switch (m->type) {
+	case MBC_1:
+		mbc1_write(m, addr, value);
+		break;
+	case MBC_2:
+		mbc2_write(m, addr, value);
+		break;
+	case MBC_3:
+		mbc3_write(m, addr, value);
+		break;
+	case MBC_5:
+		mbc5_write(m, addr, value);
+		break;
+	case MBC_HUC1:
+	case MBC_HUC3:
+		huc_write(m, addr, value);
+		break;
+	default:
+		break;
+	}
+}
+
+static size_t ram_offset(const Mapper *m, size_t ram_size, uint16_t addr) {
+	unsigned bank = 0;
+
+	switch (m->type) {
+	case MBC_1:
+		bank = m->mode ? m->bank2 : 0;
+		break;
+	case MBC_3:
+	case MBC_5:
+	case MBC_HUC1:
+	case MBC_HUC3:
+		bank = m->ram_bank;
+		break;
+	default:
+		break;
+	}
+	return ((size_t)bank * RAM_BANK_SIZE + (addr & (RAM_BANK_SIZE - 1))) % ram_size;
+}
+
+uint8_t mapper_read_ram(const Mapper *m, const uint8_t *ram, size_t ram_size, uint16_t addr) {
+	switch (m->type) {
+	case MBC_2:
+		return m->ram_enabled ? (uint8_t)(ram[addr & 0x1FF] | 0xF0) : 0xFF;
+	case MBC_3:
+		if (!m->ram_enabled) {
+			return 0xFF;
+		}
+		if (m->ram_bank >= 8) {
+			return (m->has_timer && m->ram_bank <= 0x0C) ? m->rtc.latched[m->ram_bank - 8] : 0xFF;
+		}
+		if (m->ram_bank > 3) {
+			return 0xFF;
+		}
+		break;
+	case MBC_HUC1:
+		if (m->io_mode == HUC_IR) {
+			return 0xC0;
+		}
+		break;
+	case MBC_HUC3:
+		if (m->io_mode >= 0x0B && m->io_mode <= HUC_IR) {
+			return 0x01;
+		}
+		if (m->io_mode != 0x0A && m->io_mode != 0x00) {
+			return 0xFF;
+		}
+		break;
+	default:
+		if (!m->ram_enabled) {
+			return 0xFF;
+		}
+		break;
+	}
+
+	return ram ? ram[ram_offset(m, ram_size, addr)] : 0xFF;
+}
+
+bool mapper_write_ram(Mapper *m, uint8_t *ram, size_t ram_size, uint16_t addr, uint8_t value) {
+	switch (m->type) {
+	case MBC_2:
+		if (!m->ram_enabled) {
+			return false;
+		}
+		ram[addr & 0x1FF] = value & 0x0F;
 		return true;
-	}
-
-	char tmp[SAVE_PATH_MAX + 8];
-	snprintf(tmp, sizeof tmp, "%s.tmp", c->save_path);
-
-	FILE *f = fopen(tmp, "wb");
-	if (!f) {
-		fprintf(stderr, "cartridge: cannot write '%s'\n", tmp);
-		return false;
-	}
-
-	bool ok = !c->ram_size || fwrite(c->ram, 1, c->ram_size, f) == c->ram_size;
-
-	if (ok && c->map.has_timer) {
-		uint8_t buf[SAVE_RTC_BYTES];
-
-		rtc_update(&c->map.rtc);
-		uint64_t t = (uint64_t)c->map.rtc.last;
-		memcpy(buf, c->map.rtc.regs, sizeof c->map.rtc.regs);
-		for (int i = 0; i < 8; i++) {
-			buf[5 + i] = (uint8_t)(t >> (8 * i));
+	case MBC_3:
+		if (!m->ram_enabled) {
+			return false;
 		}
-		ok = fwrite(buf, 1, sizeof buf, f) == sizeof buf;
+		if (m->ram_bank >= 8) {
+			if (!m->has_timer || m->ram_bank > 0x0C) {
+				return false;
+			}
+			rtc_write(&m->rtc, m->ram_bank - 8, value);
+			return true;
+		}
+		if (m->ram_bank > 3) {
+			return false;
+		}
+		break;
+	case MBC_HUC1:
+		if (m->io_mode == HUC_IR) {
+			return false;
+		}
+		break;
+	case MBC_HUC3:
+		if (m->io_mode != 0x0A) {
+			return false;
+		}
+		break;
+	default:
+		if (!m->ram_enabled) {
+			return false;
+		}
+		break;
 	}
 
-	ok = (fclose(f) == 0) && ok;
-	ok = ok && rename(tmp, c->save_path) == 0;
-
-	if (!ok) {
-		remove(tmp);
-		fprintf(stderr, "cartridge: failed to save '%s'\n", c->save_path);
+	if (!ram) {
 		return false;
 	}
-
-	c->dirty = false;
+	ram[ram_offset(m, ram_size, addr)] = value;
 	return true;
-}
-
-Cartridge *cartridge_load(const char *path) {
-	Cartridge *c = calloc(1, sizeof *c);
-	if (!c) {
-		return NULL;
-	}
-
-	size_t file_size;
-	if (!read_file(path, &c->rom, &file_size) || !parse_header(c, file_size)) {
-		goto fail;
-	}
-
-	if (c->ram_size) {
-		c->ram = calloc(1, c->ram_size);
-		if (!c->ram) {
-			goto fail;
-		}
-	}
-
-	mapper_reset(&c->map);
-
-	if (c->battery) {
-		make_save_path(c, path);
-		load_save(c);
-	}
-	if (c->map.multicart) {
-		printf("MBC1 multicart detected\n");
-	}
-	return c;
-
-fail:
-	cartridge_free(c);
-	return NULL;
-}
-
-void cartridge_free(Cartridge *c) {
-	if (!c) {
-		return;
-	}
-	cartridge_save(c);
-	free(c->rom);
-	free(c->ram);
-	free(c);
-}
-
-const char *cartridge_title(const Cartridge *c) {
-	return c->title;
-}
-
-uint8_t cartridge_read_rom(const Cartridge *c, uint16_t addr) {
-	return c->rom[mapper_rom_offset(&c->map, addr) & (c->rom_size - 1)];
-}
-
-void cartridge_write_rom(Cartridge *c, uint16_t addr, uint8_t value) {
-	mapper_write_rom(&c->map, addr, value);
-}
-
-uint8_t cartridge_read_ram(const Cartridge *c, uint16_t addr) {
-	return mapper_read_ram(&c->map, c->ram, c->ram_size, addr);
-}
-
-void cartridge_write_ram(Cartridge *c, uint16_t addr, uint8_t value) {
-	if (mapper_write_ram(&c->map, c->ram, c->ram_size, addr, value)) {
-		c->dirty = true;
-	}
 }
