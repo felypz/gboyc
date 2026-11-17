@@ -24,6 +24,12 @@ typedef enum {
 	ALU_CP,
 } AluOp;
 
+typedef enum {
+	ACC_NONE,
+	ACC_READ,
+	ACC_WRITE,
+} Access;
+
 static uint8_t flags(bool z, bool n, bool h, bool cy) {
 	return (z ? FLAG_Z : 0) | (n ? FLAG_N : 0) | (h ? FLAG_H : 0) | (cy ? FLAG_C : 0);
 }
@@ -32,22 +38,63 @@ static void tick(Cpu *cpu) {
 	gb_tick(cpu->gb);
 }
 
-static uint8_t rd(Cpu *cpu, uint16_t addr) {
-	uint8_t value = bus_read(cpu->gb, addr);
+static bool in_oam(uint16_t addr) {
+	return (addr >> 8) == 0xFE;
+}
+
+static void oam_bug(Cpu *cpu, Access acc, uint16_t addr, bool idu, uint16_t idu_addr) {
+	bool hit = acc != ACC_NONE && in_oam(addr);
+	bool glitch = idu && in_oam(idu_addr);
+
+	if (hit && acc == ACC_READ) {
+		ppu_oam_bug(&cpu->gb->ppu, glitch ? OAM_BUG_READ_IDU : OAM_BUG_READ);
+	} else if (hit || glitch) {
+		ppu_oam_bug(&cpu->gb->ppu, OAM_BUG_WRITE);
+	}
+}
+
+static uint8_t mcycle(Cpu *cpu, Access acc, uint16_t addr, uint8_t value, bool idu,
+					  uint16_t idu_addr) {
+	uint8_t result = 0;
+
+	oam_bug(cpu, acc, addr, idu, idu_addr);
+	if (acc == ACC_READ) {
+		result = bus_read(cpu->gb, addr);
+	} else if (acc == ACC_WRITE) {
+		bus_write(cpu->gb, addr, value);
+	}
 	tick(cpu);
-	return value;
+	return result;
+}
+
+static uint8_t rd(Cpu *cpu, uint16_t addr) {
+	return mcycle(cpu, ACC_READ, addr, 0, false, 0);
 }
 
 static void wr(Cpu *cpu, uint16_t addr, uint8_t value) {
-	bus_write(cpu->gb, addr, value);
-	tick(cpu);
+	mcycle(cpu, ACC_WRITE, addr, value, false, 0);
+}
+
+static uint8_t rd_idu(Cpu *cpu, uint16_t addr) {
+	return mcycle(cpu, ACC_READ, addr, 0, true, addr);
+}
+
+static void wr_idu(Cpu *cpu, uint16_t addr, uint8_t value) {
+	mcycle(cpu, ACC_WRITE, addr, value, true, addr);
+}
+
+static void idu_tick(Cpu *cpu, uint16_t value) {
+	mcycle(cpu, ACC_NONE, 0, 0, true, value);
 }
 
 static uint8_t fetch8(Cpu *cpu) {
-	uint8_t value = rd(cpu, cpu->pc);
+	uint8_t value;
+
 	if (cpu->halt_bug) {
+		value = rd(cpu, cpu->pc);
 		cpu->halt_bug = false;
 	} else {
+		value = rd_idu(cpu, cpu->pc);
 		cpu->pc++;
 	}
 	return value;
@@ -60,13 +107,18 @@ static uint16_t fetch16(Cpu *cpu) {
 }
 
 static void push16(Cpu *cpu, uint16_t value) {
-	wr(cpu, --cpu->sp, value >> 8);
-	wr(cpu, --cpu->sp, value & 0xFF);
+	idu_tick(cpu, cpu->sp);
+	cpu->sp--;
+	wr_idu(cpu, cpu->sp, value >> 8);
+	cpu->sp--;
+	wr(cpu, cpu->sp, value & 0xFF);
 }
 
 static uint16_t pop16(Cpu *cpu) {
-	uint8_t lo = rd(cpu, cpu->sp++);
-	uint8_t hi = rd(cpu, cpu->sp++);
+	uint8_t lo = rd_idu(cpu, cpu->sp);
+	cpu->sp++;
+	uint8_t hi = rd(cpu, cpu->sp);
+	cpu->sp++;
 	return (uint16_t)((hi << 8) | lo);
 }
 
@@ -260,7 +312,6 @@ static void jp(Cpu *cpu, bool take) {
 static void call(Cpu *cpu, bool take) {
 	uint16_t addr = fetch16(cpu);
 	if (take) {
-		tick(cpu);
 		push16(cpu, cpu->pc);
 		cpu->pc = addr;
 	}
@@ -344,27 +395,37 @@ static void exec_x0(Cpu *cpu, unsigned y, unsigned z) {
 
 	case 2: {
 		uint16_t addr = cpu->hl;
+		bool idu = false;
+
 		if (p == 0) {
 			addr = cpu->bc;
 		} else if (p == 1) {
 			addr = cpu->de;
 		} else if (p == 2) {
 			cpu->hl++;
+			idu = true;
 		} else {
 			cpu->hl--;
+			idu = true;
 		}
+
 		if (q) {
-			cpu->a = rd(cpu, addr);
+			cpu->a = idu ? rd_idu(cpu, addr) : rd(cpu, addr);
+		} else if (idu) {
+			wr_idu(cpu, addr, cpu->a);
 		} else {
 			wr(cpu, addr, cpu->a);
 		}
 		break;
 	}
 
-	case 3:
-		*rp(cpu, p) += q ? -1 : 1;
-		tick(cpu);
+	case 3: {
+		uint16_t *reg = rp(cpu, p);
+
+		idu_tick(cpu, *reg);
+		*reg += q ? -1 : 1;
 		break;
+	}
 
 	case 4:
 		set8(cpu, y, inc8(cpu, get8(cpu, y)));
@@ -504,7 +565,6 @@ static void exec_x3(Cpu *cpu, unsigned y, unsigned z) {
 	case 5:
 		if (!q) {
 			uint16_t value = (p == 3) ? cpu->af : *rp(cpu, p);
-			tick(cpu);
 			push16(cpu, value);
 		} else if (p == 0) {
 			call(cpu, true);
@@ -518,7 +578,6 @@ static void exec_x3(Cpu *cpu, unsigned y, unsigned z) {
 		break;
 
 	default:
-		tick(cpu);
 		push16(cpu, cpu->pc);
 		cpu->pc = y * 8;
 		break;
@@ -555,11 +614,13 @@ static void service_interrupt(Cpu *cpu) {
 	cpu->ime = false;
 	cpu->ei_delay = 0;
 	tick(cpu);
-	tick(cpu);
-	wr(cpu, --cpu->sp, cpu->pc >> 8);
+	idu_tick(cpu, cpu->sp);
+	cpu->sp--;
+	wr_idu(cpu, cpu->sp, cpu->pc >> 8);
 
 	uint8_t pending = bus_read(cpu->gb, ADDR_IE) & bus_read(cpu->gb, ADDR_IF) & IRQ_MASK;
-	wr(cpu, --cpu->sp, cpu->pc & 0xFF);
+	cpu->sp--;
+	wr(cpu, cpu->sp, cpu->pc & 0xFF);
 
 	if (pending) {
 		unsigned bit = 0;

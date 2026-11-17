@@ -34,6 +34,14 @@ typedef struct {
 	uint32_t framebuffer[PPU_W * PPU_H];
 } Ppu;
 
+typedef enum {
+	OAM_BUG_READ,
+	OAM_BUG_WRITE,
+	OAM_BUG_READ_IDU,
+} OamBug;
+
+void ppu_oam_bug(Ppu *p, OamBug kind);
+
 void ppu_reset(Ppu *p);
 unsigned ppu_step(Ppu *p, int cycles);
 bool ppu_take_frame(Ppu *p);

@@ -425,3 +425,80 @@ void ppu_write_oam(Ppu *p, uint16_t offset, uint8_t value) {
 		p->oam[offset] = value;
 	}
 }
+
+static uint16_t oam_word(const Ppu *p, unsigned row, unsigned i) {
+	return (uint16_t)(p->oam[row * 8 + i * 2] | (p->oam[row * 8 + i * 2 + 1] << 8));
+}
+
+static void oam_set_word(Ppu *p, unsigned row, unsigned i, uint16_t value) {
+	p->oam[row * 8 + i * 2] = (uint8_t)(value & 0xFF);
+	p->oam[row * 8 + i * 2 + 1] = (uint8_t)(value >> 8);
+}
+
+static void oam_copy_tail(Ppu *p, unsigned row) {
+	memcpy(&p->oam[row * 8 + 2], &p->oam[(row - 1) * 8 + 2], 6);
+}
+
+static void oam_corrupt_write(Ppu *p, unsigned row) {
+	if (row == 0) {
+		return;
+	}
+
+	uint16_t a = oam_word(p, row, 0);
+	uint16_t b = oam_word(p, row - 1, 0);
+	uint16_t c = oam_word(p, row - 1, 2);
+
+	oam_set_word(p, row, 0, (uint16_t)(((a ^ c) & (b ^ c)) ^ c));
+	oam_copy_tail(p, row);
+}
+
+static void oam_corrupt_read(Ppu *p, unsigned row) {
+	if (row == 0) {
+		return;
+	}
+
+	uint16_t a = oam_word(p, row, 0);
+	uint16_t b = oam_word(p, row - 1, 0);
+	uint16_t c = oam_word(p, row - 1, 2);
+
+	oam_set_word(p, row, 0, (uint16_t)(b | (a & c)));
+	oam_copy_tail(p, row);
+}
+
+static void oam_corrupt_read_idu(Ppu *p, unsigned row) {
+	if (row >= 4 && row <= 18) {
+		uint16_t a = oam_word(p, row - 2, 0);
+		uint16_t b = oam_word(p, row - 1, 0);
+		uint16_t c = oam_word(p, row, 0);
+		uint16_t d = oam_word(p, row - 1, 2);
+
+		oam_set_word(p, row - 1, 0, (uint16_t)((b & (a | c | d)) | (a & c & d)));
+		memcpy(&p->oam[row * 8], &p->oam[(row - 1) * 8], 8);
+		memcpy(&p->oam[(row - 2) * 8], &p->oam[(row - 1) * 8], 8);
+	}
+	oam_corrupt_read(p, row);
+}
+
+void ppu_oam_bug(Ppu *p, OamBug kind) {
+	if (!lcd_on(p) || p->mode != MODE_OAM) {
+		return;
+	}
+
+	unsigned row = p->dot / 4;
+
+	if (row >= 20) {
+		return;
+	}
+
+	switch (kind) {
+	case OAM_BUG_WRITE:
+		oam_corrupt_write(p, row);
+		break;
+	case OAM_BUG_READ:
+		oam_corrupt_read(p, row);
+		break;
+	case OAM_BUG_READ_IDU:
+		oam_corrupt_read_idu(p, row);
+		break;
+	}
+}

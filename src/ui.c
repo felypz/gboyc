@@ -13,16 +13,14 @@
 
 static const char *const MENU_LABELS[MENU_COUNT] = {"Load ROM", "Quit"};
 
-void ui_init(Ui *ui)
-{
+void ui_init(Ui *ui) {
 	ui->screen = UI_SCREEN_MENU;
 	ui->selected = 0;
 	ui->dialog_open = false;
 	ui->rom_path[0] = '\0';
 }
 
-UiAction ui_handle_event(Ui *ui, Platform *p, const PlatformEvent *ev)
-{
+UiAction ui_handle_event(Ui *ui, Platform *p, const PlatformEvent *ev) {
 	switch (ev->type) {
 	case PLATFORM_EV_QUIT:
 		return UI_ACTION_QUIT;
@@ -73,8 +71,7 @@ UiAction ui_handle_event(Ui *ui, Platform *p, const PlatformEvent *ev)
 	return UI_ACTION_NONE;
 }
 
-void ui_draw(const Ui *ui, Platform *p)
-{
+void ui_draw(const Ui *ui, Platform *p) {
 	platform_clear(p, DMG_COLOR_0);
 
 	if (ui->screen == UI_SCREEN_DROP) {
