@@ -45,6 +45,8 @@
 #define REG_WY	 0xFF4A
 #define REG_WX	 0xFF4B
 
+#define OAM_BUG_SHIFT 0
+
 enum {
 	MODE_HBLANK,
 	MODE_VBLANK,
@@ -242,6 +244,7 @@ static unsigned advance(Ppu *p) {
 	p->dot += 4;
 	if (p->dot >= DOTS_PER_LINE) {
 		p->dot -= DOTS_PER_LINE;
+		p->first_line = false;
 		if (++p->ly == PPU_H) {
 			irq |= PPU_IRQ_VBLANK;
 			p->frame_done = true;
@@ -258,7 +261,7 @@ static unsigned advance(Ppu *p) {
 	if (p->ly >= PPU_H) {
 		p->mode = MODE_VBLANK;
 	} else if (p->dot < OAM_SCAN_DOTS) {
-		p->mode = MODE_OAM;
+		p->mode = p->first_line ? MODE_HBLANK : MODE_OAM;
 	} else if (p->dot < p->draw_end) {
 		p->mode = MODE_DRAW;
 	} else {
@@ -352,6 +355,7 @@ static void lcdc_write(Ppu *p, uint8_t value) {
 	p->window_line = 0;
 	p->off_dots = 0;
 	p->draw_end = DRAW_END_DEFAULT;
+	p->first_line = lcd_on(p);
 	if (!lcd_on(p)) {
 		clear_screen(p);
 	}
@@ -484,11 +488,13 @@ void ppu_oam_bug(Ppu *p, OamBug kind) {
 		return;
 	}
 
-	unsigned row = p->dot / 4;
+	int dot = (int)p->dot + OAM_BUG_SHIFT;
 
-	if (row >= 20) {
+	if (dot < 0 || dot >= OAM_SCAN_DOTS) {
 		return;
 	}
+
+	unsigned row = (unsigned)dot / 4;
 
 	switch (kind) {
 	case OAM_BUG_WRITE:

@@ -31,6 +31,7 @@ typedef struct {
 	uint32_t off_dots;
 	bool stat_line;
 	bool frame_done;
+	bool first_line;
 	uint32_t framebuffer[PPU_W * PPU_H];
 } Ppu;
 
