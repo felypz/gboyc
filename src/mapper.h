@@ -14,6 +14,7 @@ typedef enum {
 	MBC_5,
 	MBC_HUC1,
 	MBC_HUC3,
+	MBC_MMM01,
 } MbcType;
 
 typedef struct {
@@ -22,6 +23,19 @@ typedef struct {
 	uint8_t latch;
 	time_t last;
 } Rtc;
+
+typedef struct {
+	bool mapped;
+	bool multiplex;
+	bool mode_lock;
+	uint8_t rom_low;
+	uint8_t rom_mid;
+	uint8_t rom_high;
+	uint8_t rom_mask;
+	uint8_t ram_low;
+	uint8_t ram_high;
+	uint8_t ram_mask;
+} Mmm01;
 
 typedef struct {
 	MbcType type;
@@ -35,7 +49,9 @@ typedef struct {
 	uint8_t bank2;
 	unsigned rom_bank;
 	unsigned ram_bank;
+	size_t rom_size;
 	Rtc rtc;
+	Mmm01 mmm;
 } Mapper;
 
 void mapper_reset(Mapper *m);

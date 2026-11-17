@@ -4,55 +4,33 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <time.h>
 
-#define HDR_TITLE	 0x134
-#define HDR_TYPE	 0x147
-#define HDR_ROM_SIZE 0x148
-#define HDR_RAM_SIZE 0x149
-#define HDR_CHECKSUM 0x14D
-#define HDR_END		 0x150
+#include "mapper.h"
 
-#define ROM_BANK_SIZE  0x4000
-#define RAM_BANK_SIZE  0x2000
-#define ROM_FILE_MAX   0x800000
-#define SAVE_PATH_MAX  4112
-#define SAVE_RTC_BYTES 13
+#define HDR_LOGO	  0x104
+#define HDR_LOGO_SIZE 0x30
+#define HDR_TITLE	  0x134
+#define HDR_TYPE	  0x147
+#define HDR_ROM_SIZE  0x148
+#define HDR_RAM_SIZE  0x149
+#define HDR_CHECKSUM  0x14D
+#define HDR_END		  0x150
 
-#define RTC_HALT  0x40
-#define RTC_CARRY 0x80
-
-typedef enum {
-	MBC_NONE,
-	MBC_1,
-	MBC_3,
-	MBC_5,
-} Mbc;
-
-typedef struct {
-	uint8_t regs[5];
-	uint8_t latched[5];
-	uint8_t latch;
-	time_t last;
-} Rtc;
+#define ROM_BANK_SIZE	0x4000
+#define ROM_FILE_MAX	0x800000
+#define MMM01_MENU_SIZE 0x8000
+#define SAVE_PATH_MAX	4112
+#define SAVE_RTC_BYTES	13
+#define MBC2_RAM_SIZE	512
 
 struct Cartridge {
 	uint8_t *rom;
 	uint8_t *ram;
 	size_t rom_size;
 	size_t ram_size;
-	Mbc mbc;
 	bool battery;
-	bool timer;
-	bool rumble;
 	bool dirty;
-	bool ram_enabled;
-	bool mode;
-	uint8_t bank1;
-	uint8_t bank2;
-	unsigned rom_bank;
-	unsigned ram_bank;
-	Rtc rtc;
+	Mapper map;
 	char title[17];
 	char save_path[SAVE_PATH_MAX];
 };
@@ -61,57 +39,24 @@ static const size_t RAM_SIZES[] = {0, 0x800, 0x2000, 0x8000, 0x20000, 0x10000};
 
 static const struct {
 	uint8_t type;
-	Mbc mbc;
+	MbcType mbc;
 	bool battery;
 	bool timer;
 	bool rumble;
 } TYPES[] = {
-	{0x00, MBC_NONE, false, false, false}, {0x08, MBC_NONE, false, false, false},
-	{0x09, MBC_NONE, true, false, false},  {0x01, MBC_1, false, false, false},
-	{0x02, MBC_1, false, false, false},	   {0x03, MBC_1, true, false, false},
-	{0x0F, MBC_3, true, true, false},	   {0x10, MBC_3, true, true, false},
-	{0x11, MBC_3, false, false, false},	   {0x12, MBC_3, false, false, false},
-	{0x13, MBC_3, true, false, false},	   {0x19, MBC_5, false, false, false},
-	{0x1A, MBC_5, false, false, false},	   {0x1B, MBC_5, true, false, false},
-	{0x1C, MBC_5, false, false, true},	   {0x1D, MBC_5, false, false, true},
-	{0x1E, MBC_5, true, false, true},
+	{0x00, MBC_NONE, false, false, false},	{0x08, MBC_NONE, false, false, false},
+	{0x09, MBC_NONE, true, false, false},	{0x01, MBC_1, false, false, false},
+	{0x02, MBC_1, false, false, false},		{0x03, MBC_1, true, false, false},
+	{0x05, MBC_2, false, false, false},		{0x06, MBC_2, true, false, false},
+	{0x0B, MBC_MMM01, false, false, false}, {0x0C, MBC_MMM01, false, false, false},
+	{0x0D, MBC_MMM01, true, false, false},	{0x0F, MBC_3, true, true, false},
+	{0x10, MBC_3, true, true, false},		{0x11, MBC_3, false, false, false},
+	{0x12, MBC_3, false, false, false},		{0x13, MBC_3, true, false, false},
+	{0x19, MBC_5, false, false, false},		{0x1A, MBC_5, false, false, false},
+	{0x1B, MBC_5, true, false, false},		{0x1C, MBC_5, false, false, true},
+	{0x1D, MBC_5, false, false, true},		{0x1E, MBC_5, true, false, true},
+	{0xFE, MBC_HUC3, true, false, false},	{0xFF, MBC_HUC1, true, false, false},
 };
-
-static void rtc_update(Rtc *r) {
-	time_t now = time(NULL);
-
-	if ((r->regs[4] & RTC_HALT) || now <= r->last) {
-		r->last = now;
-		return;
-	}
-
-	unsigned days = ((unsigned)(r->regs[4] & 1) << 8) | r->regs[3];
-	uint64_t total = r->regs[0] + r->regs[1] * 60ULL + r->regs[2] * 3600ULL + days * 86400ULL +
-					 (uint64_t)(now - r->last);
-	r->last = now;
-
-	r->regs[0] = (uint8_t)(total % 60);
-	total /= 60;
-	r->regs[1] = (uint8_t)(total % 60);
-	total /= 60;
-	r->regs[2] = (uint8_t)(total % 24);
-	total /= 24;
-
-	uint8_t flags = r->regs[4] & (RTC_HALT | RTC_CARRY);
-	if (total >= 512) {
-		flags |= RTC_CARRY;
-		total %= 512;
-	}
-	r->regs[3] = (uint8_t)(total & 0xFF);
-	r->regs[4] = flags | (uint8_t)(total >> 8);
-}
-
-static void rtc_write(Rtc *r, unsigned reg, uint8_t value) {
-	static const uint8_t masks[5] = {0x3F, 0x3F, 0x1F, 0xFF, 0xC1};
-
-	rtc_update(r);
-	r->regs[reg] = value & masks[reg];
-}
 
 static bool read_file(const char *path, uint8_t **data, size_t *size) {
 	FILE *f = fopen(path, "rb");
@@ -144,35 +89,76 @@ static bool read_file(const char *path, uint8_t **data, size_t *size) {
 	return true;
 }
 
-static bool parse_header(Cartridge *c, size_t file_size) {
+static bool checksum_ok(const uint8_t *h) {
 	uint8_t sum = 0;
+
 	for (size_t i = HDR_TITLE; i < HDR_CHECKSUM; i++) {
-		sum = (uint8_t)(sum - c->rom[i] - 1);
+		sum = (uint8_t)(sum - h[i] - 1);
 	}
-	if (sum != c->rom[HDR_CHECKSUM]) {
+	return sum == h[HDR_CHECKSUM];
+}
+
+static size_t find_header_base(const uint8_t *rom, size_t size) {
+	if (size < 2 * MMM01_MENU_SIZE || (size & (size - 1)) != 0) {
+		return 0;
+	}
+
+	size_t base = size - MMM01_MENU_SIZE;
+	uint8_t type = rom[base + HDR_TYPE];
+
+	if (type >= 0x0B && type <= 0x0D && checksum_ok(rom + base)) {
+		return base;
+	}
+	return 0;
+}
+
+static bool detect_multicart(const Cartridge *c) {
+	if (c->rom_size < 0x100000) {
+		return false;
+	}
+
+	unsigned matches = 0;
+	for (unsigned bank = 0x10; bank <= 0x30; bank += 0x10) {
+		const uint8_t *logo = c->rom + (size_t)bank * ROM_BANK_SIZE + HDR_LOGO;
+		if (memcmp(logo, c->rom + HDR_LOGO, HDR_LOGO_SIZE) == 0) {
+			matches++;
+		}
+	}
+	return matches >= 2;
+}
+
+static bool parse_header(Cartridge *c, size_t file_size) {
+	size_t base = find_header_base(c->rom, file_size);
+	const uint8_t *h = c->rom + base;
+
+	if (!checksum_ok(h)) {
 		fprintf(stderr, "cartridge: header checksum mismatch\n");
 		return false;
 	}
 
-	uint8_t rom_code = c->rom[HDR_ROM_SIZE];
-	if (rom_code > 8) {
-		fprintf(stderr, "cartridge: unsupported ROM size code 0x%02X\n", rom_code);
-		return false;
-	}
-	c->rom_size = (size_t)0x8000 << rom_code;
-	if (file_size < c->rom_size) {
-		fprintf(stderr, "cartridge: file is truncated\n");
-		return false;
+	if (base) {
+		c->rom_size = file_size;
+	} else {
+		uint8_t rom_code = h[HDR_ROM_SIZE];
+		if (rom_code > 8) {
+			fprintf(stderr, "cartridge: unsupported ROM size code 0x%02X\n", rom_code);
+			return false;
+		}
+		c->rom_size = (size_t)0x8000 << rom_code;
+		if (file_size < c->rom_size) {
+			fprintf(stderr, "cartridge: file is truncated\n");
+			return false;
+		}
 	}
 
-	uint8_t ram_code = c->rom[HDR_RAM_SIZE];
+	uint8_t ram_code = h[HDR_RAM_SIZE];
 	if (ram_code >= sizeof RAM_SIZES / sizeof *RAM_SIZES) {
 		fprintf(stderr, "cartridge: unsupported RAM size code 0x%02X\n", ram_code);
 		return false;
 	}
 	c->ram_size = RAM_SIZES[ram_code];
 
-	uint8_t type = c->rom[HDR_TYPE];
+	uint8_t type = h[HDR_TYPE];
 	size_t i = 0;
 	while (i < sizeof TYPES / sizeof *TYPES && TYPES[i].type != type) {
 		i++;
@@ -182,14 +168,18 @@ static bool parse_header(Cartridge *c, size_t file_size) {
 		return false;
 	}
 
-	c->mbc = TYPES[i].mbc;
-	c->timer = TYPES[i].timer;
-	c->rumble = TYPES[i].rumble;
-	c->battery = TYPES[i].battery && (c->ram_size || c->timer);
-	c->ram_enabled = (c->mbc == MBC_NONE);
+	c->map.type = TYPES[i].mbc;
+	c->map.has_timer = TYPES[i].timer;
+	c->map.rumble = TYPES[i].rumble;
+	c->map.rom_size = c->rom_size;
+	if (c->map.type == MBC_2) {
+		c->ram_size = MBC2_RAM_SIZE;
+	}
+	c->battery = TYPES[i].battery && (c->ram_size || c->map.has_timer);
+	c->map.multicart = c->map.type == MBC_1 && detect_multicart(c);
 
 	for (int j = 0; j < 16; j++) {
-		uint8_t ch = c->rom[HDR_TITLE + j];
+		uint8_t ch = h[HDR_TITLE + j];
 		c->title[j] = (ch >= 0x20 && ch < 0x7F) ? (char)ch : '\0';
 	}
 	return true;
@@ -218,15 +208,15 @@ static void load_save(Cartridge *c) {
 		return;
 	}
 
-	if (c->timer) {
+	if (c->map.has_timer) {
 		uint8_t buf[SAVE_RTC_BYTES];
 		if (fread(buf, 1, sizeof buf, f) == sizeof buf) {
 			uint64_t t = 0;
-			memcpy(c->rtc.regs, buf, sizeof c->rtc.regs);
+			memcpy(c->map.rtc.regs, buf, sizeof c->map.rtc.regs);
 			for (int i = 0; i < 8; i++) {
 				t |= (uint64_t)buf[5 + i] << (8 * i);
 			}
-			c->rtc.last = (time_t)t;
+			c->map.rtc.last = (time_t)t;
 		}
 	}
 
@@ -250,12 +240,12 @@ bool cartridge_save(Cartridge *c) {
 
 	bool ok = !c->ram_size || fwrite(c->ram, 1, c->ram_size, f) == c->ram_size;
 
-	if (ok && c->timer) {
+	if (ok && c->map.has_timer) {
 		uint8_t buf[SAVE_RTC_BYTES];
-		uint64_t t = (uint64_t)c->rtc.last;
 
-		rtc_update(&c->rtc);
-		memcpy(buf, c->rtc.regs, sizeof c->rtc.regs);
+		rtc_update(&c->map.rtc);
+		uint64_t t = (uint64_t)c->map.rtc.last;
+		memcpy(buf, c->map.rtc.regs, sizeof c->map.rtc.regs);
 		for (int i = 0; i < 8; i++) {
 			buf[5 + i] = (uint8_t)(t >> (8 * i));
 		}
@@ -293,13 +283,17 @@ Cartridge *cartridge_load(const char *path) {
 		}
 	}
 
-	c->bank1 = 1;
-	c->rom_bank = 1;
-	c->rtc.last = time(NULL);
+	mapper_reset(&c->map);
 
 	if (c->battery) {
 		make_save_path(c, path);
 		load_save(c);
+	}
+	if (c->map.multicart) {
+		printf("MBC1 multicart detected\n");
+	}
+	if (c->map.type == MBC_MMM01) {
+		printf("MMM01 multicart detected\n");
 	}
 	return c;
 
@@ -322,152 +316,20 @@ const char *cartridge_title(const Cartridge *c) {
 	return c->title;
 }
 
-static unsigned rom_bank_for(const Cartridge *c, uint16_t addr) {
-	switch (c->mbc) {
-	case MBC_1:
-		if (addr < ROM_BANK_SIZE) {
-			return c->mode ? (unsigned)c->bank2 << 5 : 0;
-		}
-		return ((unsigned)c->bank2 << 5) | c->bank1;
-	case MBC_3:
-	case MBC_5:
-		return addr < ROM_BANK_SIZE ? 0 : c->rom_bank;
-	default:
-		return addr >> 14;
-	}
-}
-
 uint8_t cartridge_read_rom(const Cartridge *c, uint16_t addr) {
-	size_t offset = (size_t)rom_bank_for(c, addr) * ROM_BANK_SIZE + (addr & (ROM_BANK_SIZE - 1));
-	return c->rom[offset & (c->rom_size - 1)];
-}
-
-static void mbc1_write(Cartridge *c, uint16_t addr, uint8_t value) {
-	switch (addr >> 13) {
-	case 0:
-		c->ram_enabled = (value & 0x0F) == 0x0A;
-		break;
-	case 1:
-		c->bank1 = value & 0x1F;
-		if (c->bank1 == 0) {
-			c->bank1 = 1;
-		}
-		break;
-	case 2:
-		c->bank2 = value & 0x03;
-		break;
-	default:
-		c->mode = value & 1;
-		break;
-	}
-}
-
-static void mbc3_write(Cartridge *c, uint16_t addr, uint8_t value) {
-	switch (addr >> 13) {
-	case 0:
-		c->ram_enabled = (value & 0x0F) == 0x0A;
-		break;
-	case 1:
-		c->rom_bank = value & 0x7F;
-		if (c->rom_bank == 0) {
-			c->rom_bank = 1;
-		}
-		break;
-	case 2:
-		c->ram_bank = value & 0x0F;
-		break;
-	default:
-		if (c->timer && c->rtc.latch == 0 && value == 1) {
-			rtc_update(&c->rtc);
-			memcpy(c->rtc.latched, c->rtc.regs, sizeof c->rtc.latched);
-		}
-		c->rtc.latch = value;
-		break;
-	}
-}
-
-static void mbc5_write(Cartridge *c, uint16_t addr, uint8_t value) {
-	switch (addr >> 12) {
-	case 0:
-	case 1:
-		c->ram_enabled = (value & 0x0F) == 0x0A;
-		break;
-	case 2:
-		c->rom_bank = (c->rom_bank & 0x100) | value;
-		break;
-	case 3:
-		c->rom_bank = (c->rom_bank & 0xFF) | ((unsigned)(value & 1) << 8);
-		break;
-	case 4:
-	case 5:
-		c->ram_bank = value & (c->rumble ? 0x07 : 0x0F);
-		break;
-	default:
-		break;
-	}
+	return c->rom[mapper_rom_offset(&c->map, addr) & (c->rom_size - 1)];
 }
 
 void cartridge_write_rom(Cartridge *c, uint16_t addr, uint8_t value) {
-	switch (c->mbc) {
-	case MBC_1:
-		mbc1_write(c, addr, value);
-		break;
-	case MBC_3:
-		mbc3_write(c, addr, value);
-		break;
-	case MBC_5:
-		mbc5_write(c, addr, value);
-		break;
-	default:
-		break;
-	}
-}
-
-static size_t ram_offset(const Cartridge *c, uint16_t addr) {
-	unsigned bank = 0;
-
-	if (c->mbc == MBC_1) {
-		bank = c->mode ? c->bank2 : 0;
-	} else if (c->mbc == MBC_3 || c->mbc == MBC_5) {
-		bank = c->ram_bank;
-	}
-	return ((size_t)bank * RAM_BANK_SIZE + (addr & (RAM_BANK_SIZE - 1))) % c->ram_size;
-}
-
-static bool rtc_selected(const Cartridge *c) {
-	return c->mbc == MBC_3 && c->ram_bank >= 8;
-}
-
-static bool ram_selected(const Cartridge *c) {
-	return c->ram && !(c->mbc == MBC_3 && c->ram_bank > 3);
+	mapper_write_rom(&c->map, addr, value);
 }
 
 uint8_t cartridge_read_ram(const Cartridge *c, uint16_t addr) {
-	if (!c->ram_enabled) {
-		return 0xFF;
-	}
-	if (rtc_selected(c)) {
-		return (c->timer && c->ram_bank <= 0x0C) ? c->rtc.latched[c->ram_bank - 8] : 0xFF;
-	}
-	if (!ram_selected(c)) {
-		return 0xFF;
-	}
-	return c->ram[ram_offset(c, addr)];
+	return mapper_read_ram(&c->map, c->ram, c->ram_size, addr);
 }
 
 void cartridge_write_ram(Cartridge *c, uint16_t addr, uint8_t value) {
-	if (!c->ram_enabled) {
-		return;
-	}
-	if (rtc_selected(c)) {
-		if (c->timer && c->ram_bank <= 0x0C) {
-			rtc_write(&c->rtc, c->ram_bank - 8, value);
-			c->dirty = true;
-		}
-		return;
-	}
-	if (ram_selected(c)) {
-		c->ram[ram_offset(c, addr)] = value;
+	if (mapper_write_ram(&c->map, c->ram, c->ram_size, addr, value)) {
 		c->dirty = true;
 	}
 }

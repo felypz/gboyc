@@ -1,9 +1,10 @@
 #include "mapper.h"
 
-#define ROM_BANK_SIZE 0x4000
-#define RAM_BANK_SIZE 0x2000
+#define ROM_BANK_SIZE	0x4000
+#define RAM_BANK_SIZE	0x2000
+#define MMM01_MENU_SIZE 0x8000
 
-#define RTC_HALT 0x40
+#define RTC_HALT  0x40
 #define RTC_CARRY 0x80
 
 #define HUC_IR 0x0E
@@ -51,6 +52,47 @@ void mapper_reset(Mapper *m) {
 	m->rtc.last = time(NULL);
 }
 
+static size_t mmm01_rom_offset(const Mapper *m, uint16_t addr) {
+	const Mmm01 *c = &m->mmm;
+
+	if (!c->mapped) {
+		return m->rom_size - MMM01_MENU_SIZE + (addr & 0x7FFF);
+	}
+
+	unsigned low;
+	unsigned mid;
+
+	if (addr < ROM_BANK_SIZE) {
+		low = c->rom_low & c->rom_mask;
+		if (c->multiplex) {
+			mid = m->mode ? c->ram_low : (c->ram_low & c->ram_mask);
+		} else {
+			mid = c->rom_mid;
+		}
+	} else {
+		low = c->rom_low;
+		if ((low & ~c->rom_mask & 0x1F) == 0) {
+			low |= 1;
+		}
+		mid = c->multiplex ? c->ram_low : c->rom_mid;
+	}
+
+	unsigned bank = ((unsigned)c->rom_high << 7) | (mid << 5) | low;
+	return (size_t)bank * ROM_BANK_SIZE + (addr & (ROM_BANK_SIZE - 1));
+}
+
+static unsigned mmm01_ram_bank(const Mapper *m) {
+	const Mmm01 *c = &m->mmm;
+	unsigned low;
+
+	if (c->multiplex) {
+		low = c->rom_mid;
+	} else {
+		low = m->mode ? c->ram_low : (c->ram_low & c->ram_mask);
+	}
+	return ((unsigned)c->ram_high << 2) | low;
+}
+
 size_t mapper_rom_offset(const Mapper *m, uint16_t addr) {
 	unsigned bank;
 
@@ -66,6 +108,8 @@ size_t mapper_rom_offset(const Mapper *m, uint16_t addr) {
 		}
 		break;
 	}
+	case MBC_MMM01:
+		return mmm01_rom_offset(m, addr);
 	case MBC_NONE:
 		bank = addr >> 14;
 		break;
@@ -173,6 +217,43 @@ static void huc_write(Mapper *m, uint16_t addr, uint8_t value) {
 	}
 }
 
+static void mmm01_write(Mapper *m, uint16_t addr, uint8_t value) {
+	Mmm01 *c = &m->mmm;
+
+	switch (addr >> 13) {
+	case 0:
+		m->ram_enabled = (value & 0x0F) == 0x0A;
+		if (!c->mapped) {
+			c->ram_mask = (value >> 4) & 3;
+			c->mapped = value & 0x40;
+		}
+		break;
+	case 1:
+		c->rom_low = (uint8_t)((c->rom_low & c->rom_mask) | ((value & 0x1F) & ~c->rom_mask));
+		if (!c->mapped) {
+			c->rom_mid = (value >> 5) & 3;
+		}
+		break;
+	case 2:
+		c->ram_low = (uint8_t)((c->ram_low & c->ram_mask) | ((value & 3) & ~c->ram_mask));
+		if (!c->mapped) {
+			c->ram_high = (value >> 2) & 3;
+			c->rom_high = (value >> 4) & 3;
+			c->mode_lock = value & 0x40;
+		}
+		break;
+	default:
+		if (!c->mapped) {
+			c->rom_mask = (value >> 1) & 0x1E;
+			c->multiplex = value & 0x40;
+		}
+		if (!c->mode_lock) {
+			m->mode = value & 1;
+		}
+		break;
+	}
+}
+
 void mapper_write_rom(Mapper *m, uint16_t addr, uint8_t value) {
 	switch (m->type) {
 	case MBC_1:
@@ -191,6 +272,9 @@ void mapper_write_rom(Mapper *m, uint16_t addr, uint8_t value) {
 	case MBC_HUC3:
 		huc_write(m, addr, value);
 		break;
+	case MBC_MMM01:
+		mmm01_write(m, addr, value);
+		break;
 	default:
 		break;
 	}
@@ -208,6 +292,9 @@ static size_t ram_offset(const Mapper *m, size_t ram_size, uint16_t addr) {
 	case MBC_HUC1:
 	case MBC_HUC3:
 		bank = m->ram_bank;
+		break;
+	case MBC_MMM01:
+		bank = mmm01_ram_bank(m);
 		break;
 	default:
 		break;
