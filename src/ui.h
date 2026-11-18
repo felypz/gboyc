@@ -28,6 +28,8 @@ typedef struct {
 	bool dialog_open;
 	bool dialog_boot;
 	bool boot_ok;
+	bool system_dark;
+	bool status_warn;
 	char status[48];
 	char rom_path[PLATFORM_PATH_MAX];
 	Settings *settings;

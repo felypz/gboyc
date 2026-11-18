@@ -285,6 +285,7 @@ int main(void) {
 			if (!paused) {
 				run_emulation(plat, &frames);
 			}
+			platform_set_background(plat, 0xFF000000);
 			platform_draw_frame(plat, gb_framebuffer(&gb));
 			draw_overlay(plat);
 			platform_flip(plat);

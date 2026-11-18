@@ -10,8 +10,8 @@
 #define GB_SCREEN_W 160
 #define GB_SCREEN_H 144
 
-#define UI_VIEW_W (GB_SCREEN_W * 2)
-#define UI_VIEW_H (GB_SCREEN_H * 2)
+#define UI_VIEW_W (GB_SCREEN_W * 4)
+#define UI_VIEW_H (GB_SCREEN_H * 4)
 
 #define PLATFORM_PATH_MAX 4096
 
@@ -35,6 +35,7 @@ typedef enum {
 	PLATFORM_EV_STEP_INSTR,
 	PLATFORM_EV_STEP_CYCLE,
 	PLATFORM_EV_KEY_CAPTURED,
+	PLATFORM_EV_THEME_CHANGED,
 	PLATFORM_EV_FILE_CHOSEN,
 	PLATFORM_EV_DIALOG_CANCELED,
 	PLATFORM_EV_DIALOG_FAILED,
@@ -60,6 +61,9 @@ bool platform_key_valid(int scancode);
 void platform_capture_keys(Platform *p, bool on);
 
 void platform_set_view(Platform *p, int w, int h);
+
+bool platform_system_dark(void);
+void platform_set_background(Platform *p, uint32_t argb);
 
 void platform_clear(Platform *p, uint32_t argb);
 void platform_fill_rect(Platform *p, int x, int y, int w, int h, uint32_t argb);

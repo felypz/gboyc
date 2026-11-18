@@ -25,6 +25,7 @@ struct Platform {
 	int view_w;
 	int view_h;
 	bool capture;
+	uint32_t background;
 };
 
 static void set_color(Platform *p, uint32_t argb) {
@@ -49,6 +50,8 @@ static void audio_open(Platform *p) {
 
 Platform *platform_create(const char *title, int scale) {
 	Platform *p = calloc(1, sizeof *p);
+	p->background = 0xFF000000;
+
 	if (!p) {
 		return NULL;
 	}
@@ -139,7 +142,7 @@ static const char *hotkey_name(SDL_Keycode key) {
 	case SDLK_N:
 		return "Step frame";
 	case SDLK_I:
-		return "Step instruction";
+		return "Step instr";
 	case SDLK_C:
 		return "Step cycle";
 	default:
@@ -235,6 +238,9 @@ bool platform_next_event(Platform *p, PlatformEvent *out) {
 		switch (ev.type) {
 		case SDL_EVENT_QUIT:
 			out->type = PLATFORM_EV_QUIT;
+			return true;
+		case SDL_EVENT_SYSTEM_THEME_CHANGED:
+			out->type = PLATFORM_EV_THEME_CHANGED;
 			return true;
 		case SDL_EVENT_KEY_DOWN:
 			if (p->capture) {
@@ -347,6 +353,14 @@ bool platform_make_dir(const char *path) {
 	return SDL_CreateDirectory(path);
 }
 
+bool platform_system_dark(void) {
+	return SDL_GetSystemTheme() != SDL_SYSTEM_THEME_LIGHT;
+}
+
+void platform_set_background(Platform *p, uint32_t argb) {
+	p->background = argb;
+}
+
 void platform_clear(Platform *p, uint32_t argb) {
 	set_color(p, argb);
 	SDL_RenderClear(p->renderer);
@@ -372,6 +386,7 @@ void platform_draw_text_centered(Platform *p, int y, int scale, uint32_t argb, c
 }
 
 void platform_flip(Platform *p) {
+	set_color(p, p->background);
 	SDL_RenderPresent(p->renderer);
 }
 

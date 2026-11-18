@@ -16,6 +16,7 @@ static const char *const BUTTON_NAMES[JOY_BUTTONS] = {
 void settings_defaults(Settings *s) {
 	memset(s, 0, sizeof *s);
 	s->boot_enabled = true;
+	s->theme = THEME_AUTO;
 	snprintf(s->boot_file, sizeof s->boot_file, "%s", DEFAULT_BOOT_FILE);
 	platform_default_keymap(&s->keymap);
 }
@@ -63,6 +64,8 @@ static void parse_line(Settings *s, char *line) {
 		if (valid_file_name(value)) {
 			snprintf(s->boot_file, sizeof s->boot_file, "%s", value);
 		}
+	} else if (strcmp(name, "theme") == 0) {
+		s->theme = theme_mode_parse(value);
 	} else if (strncmp(name, "joy.", 4) == 0) {
 		parse_keys(s, name + 4, value);
 	}
@@ -97,7 +100,9 @@ bool settings_save(const Settings *s) {
 		return false;
 	}
 
-	fprintf(f, "boot=%s\nboot_file=%s\n", s->boot_enabled ? "on" : "off", s->boot_file);
+	fprintf(f, "boot=%s\nboot_file=%s\ntheme=%s\n", s->boot_enabled ? "on" : "off", s->boot_file,
+			theme_mode_key(s->theme));
+
 	for (int i = 0; i < JOY_BUTTONS; i++) {
 		fprintf(f, "joy.%s=%d,%d\n", BUTTON_NAMES[i], s->keymap.key[i][0], s->keymap.key[i][1]);
 	}
