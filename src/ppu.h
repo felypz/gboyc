@@ -27,11 +27,21 @@ typedef struct {
 	uint8_t mode;
 	uint8_t window_line;
 	uint16_t dot;
-	uint16_t draw_end;
 	uint32_t off_dots;
 	bool stat_line;
 	bool frame_done;
 	bool first_line;
+	bool drawing;
+	bool wy_trigger;
+	bool win_on;
+	bool win_used;
+	uint8_t lcd_x;
+	uint8_t scx_fine;
+	uint8_t stall;
+	int16_t win_start;
+	uint8_t sprite_count;
+	uint8_t sprite_next;
+	uint8_t sprites[10];
 	uint32_t framebuffer[PPU_W * PPU_H];
 } Ppu;
 

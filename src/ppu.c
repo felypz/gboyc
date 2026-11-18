@@ -8,11 +8,11 @@
 #define LINES_PER_FRAME		 154
 #define DOTS_PER_FRAME		 (DOTS_PER_LINE * LINES_PER_FRAME)
 #define OAM_SCAN_DOTS		 80
-#define DRAW_BASE_DOTS		 172
-#define DRAW_END_DEFAULT	 (OAM_SCAN_DOTS + DRAW_BASE_DOTS)
+#define MODE3_STARTUP_DOTS	 12
+#define WINDOW_STALL_DOTS	 6
+#define LCD_ON_START_DOT	 4
 #define OAM_ENTRIES			 40
 #define MAX_SPRITES_PER_LINE 10
-#define LCD_ON_START_DOT	 4
 
 #define LCDC_ENABLE		0x80
 #define LCDC_WIN_MAP	0x40
@@ -83,6 +83,9 @@ static unsigned scan_sprites(const Ppu *p, uint8_t *found) {
 }
 
 static unsigned tile_pixel(const Ppu *p, unsigned map, unsigned x, unsigned y) {
+	x &= 0xFF;
+	y &= 0xFF;
+
 	uint8_t tile = p->vram[map + (y >> 3) * 32 + (x >> 3)];
 	unsigned addr =
 		(p->lcdc & LCDC_TILE_DATA) ? tile * 16u : (unsigned)(0x1000 + (int8_t)tile * 16);
@@ -92,45 +95,73 @@ static unsigned tile_pixel(const Ppu *p, unsigned map, unsigned x, unsigned y) {
 	return (((p->vram[addr + 1] >> bit) & 1) << 1) | ((p->vram[addr] >> bit) & 1);
 }
 
-static void render_background(const Ppu *p, uint8_t *bg_id) {
+static unsigned background_id(const Ppu *p) {
 	if (!(p->lcdc & LCDC_BG_ENABLE)) {
-		memset(bg_id, 0, PPU_W);
-		return;
+		return 0;
+	}
+
+	if (p->win_on) {
+		unsigned map = (p->lcdc & LCDC_WIN_MAP) ? 0x1C00 : 0x1800;
+		return tile_pixel(p, map, (unsigned)(p->lcd_x - p->win_start), p->window_line);
 	}
 
 	unsigned map = (p->lcdc & LCDC_BG_MAP) ? 0x1C00 : 0x1800;
-	unsigned y = (uint8_t)(p->ly + p->scy);
+	unsigned x = (unsigned)(p->scx & 0xF8) + p->lcd_x + p->scx_fine;
+	unsigned y = (unsigned)p->ly + p->scy;
 
-	for (unsigned x = 0; x < PPU_W; x++) {
-		bg_id[x] = (uint8_t)tile_pixel(p, map, (uint8_t)(x + p->scx), y);
-	}
+	return tile_pixel(p, map, x, y);
 }
 
-static bool window_visible(const Ppu *p) {
-	return (p->lcdc & LCDC_WIN_ENABLE) && (p->lcdc & LCDC_BG_ENABLE) && p->ly >= p->wy &&
-		   p->wx <= 166;
-}
-
-static void render_window(Ppu *p, uint8_t *bg_id) {
-	if (!window_visible(p)) {
-		return;
-	}
-
-	unsigned map = (p->lcdc & LCDC_WIN_MAP) ? 0x1C00 : 0x1800;
-	int start = p->wx - 7;
-
-	for (int x = start < 0 ? 0 : start; x < PPU_W; x++) {
-		bg_id[x] = (uint8_t)tile_pixel(p, map, (unsigned)(x - start), p->window_line);
-	}
-	p->window_line++;
-}
-
-static void render_sprites(const Ppu *p, const uint8_t *bg_id, uint32_t *row) {
+static void sprite_pixel(const Ppu *p, unsigned bg_id, uint32_t *color) {
 	if (!(p->lcdc & LCDC_OBJ_ENABLE)) {
 		return;
 	}
 
 	int height = (p->lcdc & LCDC_OBJ_TALL) ? 16 : 8;
+
+	for (unsigned s = 0; s < p->sprite_count; s++) {
+		const uint8_t *obj = &p->oam[p->sprites[s] * 4];
+		int px = (int)p->lcd_x + 8 - obj[1];
+
+		if (px < 0 || px > 7) {
+			continue;
+		}
+
+		unsigned attr = obj[3];
+		int line = p->ly - (obj[0] - 16);
+		unsigned tile = obj[2];
+
+		if (attr & OBJ_FLIP_Y) {
+			line = height - 1 - line;
+		}
+		if (height == 16) {
+			tile &= 0xFE;
+		}
+
+		unsigned addr = tile * 16 + (unsigned)line * 2;
+		unsigned bit = (attr & OBJ_FLIP_X) ? (unsigned)px : (unsigned)(7 - px);
+		unsigned id = (((p->vram[addr + 1] >> bit) & 1) << 1) | ((p->vram[addr] >> bit) & 1);
+
+		if (id == 0) {
+			continue;
+		}
+		if ((attr & OBJ_BEHIND_BG) && bg_id != 0) {
+			return;
+		}
+		*color = shade((attr & OBJ_PALETTE1) ? p->obp1 : p->obp0, id);
+		return;
+	}
+}
+
+static void output_pixel(Ppu *p) {
+	unsigned id = background_id(p);
+	uint32_t color = (p->lcdc & LCDC_BG_ENABLE) ? shade(p->bgp, id) : SHADES[0];
+
+	sprite_pixel(p, id, &color);
+	p->framebuffer[p->ly * PPU_W + p->lcd_x] = color;
+}
+
+static void start_drawing(Ppu *p) {
 	uint8_t found[MAX_SPRITES_PER_LINE];
 	unsigned count = scan_sprites(p, found);
 
@@ -144,81 +175,78 @@ static void render_sprites(const Ppu *p, const uint8_t *bg_id, uint32_t *row) {
 		found[j] = cur;
 	}
 
-	bool drawn[PPU_W] = {false};
+	memcpy(p->sprites, found, count);
+	p->sprite_count = (uint8_t)count;
+	p->sprite_next = 0;
 
-	for (unsigned s = 0; s < count; s++) {
-		const uint8_t *obj = &p->oam[found[s] * 4];
-		unsigned attr = obj[3];
-		int line = p->ly - (obj[0] - 16);
-		unsigned tile = obj[2];
-
-		if (attr & OBJ_FLIP_Y) {
-			line = height - 1 - line;
-		}
-		if (height == 16) {
-			tile &= 0xFE;
-		}
-
-		unsigned addr = tile * 16 + (unsigned)line * 2;
-		uint8_t lo = p->vram[addr];
-		uint8_t hi = p->vram[addr + 1];
-		uint8_t palette = (attr & OBJ_PALETTE1) ? p->obp1 : p->obp0;
-
-		for (int px = 0; px < 8; px++) {
-			int x = obj[1] - 8 + px;
-			if (x < 0 || x >= PPU_W || drawn[x]) {
-				continue;
-			}
-
-			unsigned bit = (attr & OBJ_FLIP_X) ? (unsigned)px : (unsigned)(7 - px);
-			unsigned id = (((hi >> bit) & 1) << 1) | ((lo >> bit) & 1);
-			if (id == 0) {
-				continue;
-			}
-
-			drawn[x] = true;
-			if ((attr & OBJ_BEHIND_BG) && bg_id[x] != 0) {
-				continue;
-			}
-			row[x] = shade(palette, id);
-		}
+	if ((p->lcdc & LCDC_WIN_ENABLE) && p->ly == p->wy) {
+		p->wy_trigger = true;
 	}
+
+	p->drawing = true;
+	p->lcd_x = 0;
+	p->win_on = false;
+	p->win_used = false;
+	p->scx_fine = p->scx & 7;
+	p->stall = (uint8_t)(MODE3_STARTUP_DOTS + p->scx_fine);
 }
 
-static void render_line(Ppu *p) {
-	uint8_t bg_id[PPU_W];
-	uint32_t *row = &p->framebuffer[p->ly * PPU_W];
-	bool bg_on = p->lcdc & LCDC_BG_ENABLE;
-
-	render_background(p, bg_id);
-	render_window(p, bg_id);
-
-	for (unsigned x = 0; x < PPU_W; x++) {
-		row[x] = bg_on ? shade(p->bgp, bg_id[x]) : SHADES[0];
+static bool window_starts(const Ppu *p) {
+	if (p->win_on || !p->wy_trigger || !(p->lcdc & LCDC_WIN_ENABLE) ||
+		!(p->lcdc & LCDC_BG_ENABLE) || p->wx > 166) {
+		return false;
 	}
-
-	render_sprites(p, bg_id, row);
+	return p->lcd_x + 7 == p->wx || (p->lcd_x == 0 && p->wx < 7);
 }
 
-static unsigned draw_end_for_line(const Ppu *p) {
-	unsigned dots = OAM_SCAN_DOTS + DRAW_BASE_DOTS + (p->scx & 7);
+static unsigned sprite_stall(const Ppu *p, unsigned x) {
+	unsigned off = (x + p->scx) & 7;
+	return 11 - (off < 5 ? off : 5);
+}
 
-	if (p->lcdc & LCDC_OBJ_ENABLE) {
-		uint8_t found[MAX_SPRITES_PER_LINE];
-		unsigned count = scan_sprites(p, found);
+static void mode3_dot(Ppu *p) {
+	if (p->stall) {
+		p->stall--;
+		return;
+	}
 
-		for (unsigned i = 0; i < count; i++) {
-			unsigned x = p->oam[found[i] * 4 + 1];
-			if (x < 168) {
-				unsigned off = (x + p->scx) & 7;
-				dots += 11 - (off < 5 ? off : 5);
-			}
+	if (window_starts(p)) {
+		p->win_on = true;
+		p->win_used = true;
+		p->win_start = (int16_t)(p->wx - 7);
+		p->stall += WINDOW_STALL_DOTS;
+	}
+
+	while (p->sprite_next < p->sprite_count) {
+		unsigned x = p->oam[p->sprites[p->sprite_next] * 4 + 1];
+		unsigned trigger = x < 8 ? 0 : x - 8;
+
+		if (x >= 168 || trigger > p->lcd_x) {
+			break;
+		}
+		if (p->lcdc & LCDC_OBJ_ENABLE) {
+			p->stall += (uint8_t)sprite_stall(p, x);
+		}
+		p->sprite_next++;
+	}
+
+	if (p->stall) {
+		p->stall--;
+		return;
+	}
+
+	if (p->win_on && !(p->lcdc & LCDC_WIN_ENABLE)) {
+		p->win_on = false;
+	}
+
+	output_pixel(p);
+
+	if (++p->lcd_x == PPU_W) {
+		p->drawing = false;
+		if (p->win_used) {
+			p->window_line++;
 		}
 	}
-	if (window_visible(p)) {
-		dots += 6;
-	}
-	return dots;
 }
 
 static bool stat_line_now(const Ppu *p) {
@@ -236,39 +264,48 @@ static bool stat_edge(Ppu *p) {
 	return rising;
 }
 
-static unsigned advance(Ppu *p) {
+static unsigned dot_step(Ppu *p) {
 	unsigned irq = 0;
-	uint8_t old_mode = p->mode;
 
-	p->dot += 4;
-	if (p->dot >= DOTS_PER_LINE) {
-		p->dot -= DOTS_PER_LINE;
+	if (++p->dot >= DOTS_PER_LINE) {
+		p->dot = 0;
 		p->first_line = false;
+		if (p->ly < PPU_H && (p->lcdc & LCDC_WIN_ENABLE) && p->ly == p->wy) {
+			p->wy_trigger = true;
+		}
 		if (++p->ly == PPU_H) {
 			irq |= PPU_IRQ_VBLANK;
 			p->frame_done = true;
 		} else if (p->ly == LINES_PER_FRAME) {
 			p->ly = 0;
 			p->window_line = 0;
+			p->wy_trigger = false;
 		}
 	}
 
 	if (p->ly < PPU_H && p->dot == OAM_SCAN_DOTS) {
-		p->draw_end = (uint16_t)draw_end_for_line(p);
+		start_drawing(p);
 	}
 
 	if (p->ly >= PPU_H) {
 		p->mode = MODE_VBLANK;
 	} else if (p->dot < OAM_SCAN_DOTS) {
 		p->mode = p->first_line ? MODE_HBLANK : MODE_OAM;
-	} else if (p->dot < p->draw_end) {
-		p->mode = MODE_DRAW;
 	} else {
-		p->mode = MODE_HBLANK;
+		p->mode = p->drawing ? MODE_DRAW : MODE_HBLANK;
 	}
 
-	if (old_mode == MODE_DRAW && p->mode == MODE_HBLANK) {
-		render_line(p);
+	if (p->mode == MODE_DRAW) {
+		mode3_dot(p);
+	}
+	return irq;
+}
+
+static unsigned advance(Ppu *p) {
+	unsigned irq = 0;
+
+	for (int i = 0; i < 4; i++) {
+		irq |= dot_step(p);
 	}
 	if (stat_edge(p)) {
 		irq |= PPU_IRQ_STAT;
@@ -283,7 +320,6 @@ void ppu_reset(Ppu *p) {
 	p->obp0 = 0xFF;
 	p->obp1 = 0xFF;
 	p->mode = MODE_HBLANK;
-	p->draw_end = DRAW_END_DEFAULT;
 	clear_screen(p);
 }
 
@@ -353,8 +389,13 @@ static void lcdc_write(Ppu *p, uint8_t value) {
 	p->mode = MODE_HBLANK;
 	p->window_line = 0;
 	p->off_dots = 0;
-	p->draw_end = DRAW_END_DEFAULT;
 	p->first_line = lcd_on(p);
+	p->drawing = false;
+	p->wy_trigger = false;
+	p->win_on = false;
+	p->win_used = false;
+	p->lcd_x = 0;
+	p->stall = 0;
 	if (!lcd_on(p)) {
 		clear_screen(p);
 	}
