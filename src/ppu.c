@@ -12,6 +12,7 @@
 #define DRAW_END_DEFAULT	 (OAM_SCAN_DOTS + DRAW_BASE_DOTS)
 #define OAM_ENTRIES			 40
 #define MAX_SPRITES_PER_LINE 10
+#define LCD_ON_START_DOT	 4
 
 #define LCDC_ENABLE		0x80
 #define LCDC_WIN_MAP	0x40
@@ -44,8 +45,6 @@
 #define REG_OBP1 0xFF49
 #define REG_WY	 0xFF4A
 #define REG_WX	 0xFF4B
-
-#define OAM_BUG_SHIFT 0
 
 enum {
 	MODE_HBLANK,
@@ -350,7 +349,7 @@ static void lcdc_write(Ppu *p, uint8_t value) {
 	}
 
 	p->ly = 0;
-	p->dot = 0;
+	p->dot = lcd_on(p) ? LCD_ON_START_DOT : 0;
 	p->mode = MODE_HBLANK;
 	p->window_line = 0;
 	p->off_dots = 0;
@@ -488,13 +487,7 @@ void ppu_oam_bug(Ppu *p, OamBug kind) {
 		return;
 	}
 
-	int dot = (int)p->dot + OAM_BUG_SHIFT;
-
-	if (dot < 0 || dot >= OAM_SCAN_DOTS) {
-		return;
-	}
-
-	unsigned row = (unsigned)dot / 4;
+	unsigned row = p->dot / 4;
 
 	switch (kind) {
 	case OAM_BUG_WRITE:
