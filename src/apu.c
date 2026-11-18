@@ -8,6 +8,7 @@
 #define MIX_NORM		   (1.0f / 480.0f)
 #define OUTPUT_GAIN		   1.5f
 #define WAVE_TRIGGER_DELAY 6
+#define WAVE_READ_OFFSET   2
 
 #define ADDR_NR10 0xFF10
 #define ADDR_NR50 0xFF24
@@ -178,9 +179,6 @@ static void advance(Apu *a, unsigned i) {
 			lfsr_clock(a);
 		} else {
 			c->pos = (uint8_t)((c->pos + 1) & (i == 2 ? 31 : 7));
-			if (i == 2) {
-				a->wave_access = true;
-			}
 		}
 	}
 }
@@ -253,9 +251,19 @@ static void emit(Apu *a) {
 	}
 }
 
-static void wave_trigger_corruption(Apu *a) {
-	unsigned idx = a->ch[2].pos >> 1;
+static int wave_hit(const Apu *a) {
+	const ApuChannel *c = &a->ch[2];
 
+	if (!c->on) {
+		return -1;
+	}
+	if (WAVE_READ_OFFSET == 0) {
+		return c->timer == period(a, 2) ? c->pos >> 1 : -1;
+	}
+	return c->timer == WAVE_READ_OFFSET ? ((c->pos + 1) & 31) >> 1 : -1;
+}
+
+static void wave_trigger_corruption(Apu *a, unsigned idx) {
 	if (idx < 4) {
 		a->wave[0] = a->wave[idx];
 	} else {
@@ -266,8 +274,12 @@ static void wave_trigger_corruption(Apu *a) {
 static void trigger(Apu *a, unsigned i) {
 	ApuChannel *c = &a->ch[i];
 
-	if (i == 2 && c->on && a->wave_access) {
-		wave_trigger_corruption(a);
+	if (i == 2 && c->on) {
+		int idx = wave_hit(a);
+
+		if (idx >= 0) {
+			wave_trigger_corruption(a, (unsigned)idx);
+		}
 	}
 
 	c->on = c->dac;
@@ -379,7 +391,6 @@ void apu_reset(Apu *a, bool boot) {
 
 void apu_step(Apu *a, int cycles) {
 	for (int n = 0; n < cycles; n += 4) {
-		a->wave_access = false;
 
 		if (a->power) {
 			a->fs_cycles += 4;
@@ -406,7 +417,8 @@ void apu_step(Apu *a, int cycles) {
 uint8_t apu_read(const Apu *a, uint16_t addr) {
 	if (addr >= ADDR_WAVE) {
 		if (a->ch[2].on) {
-			return a->wave_access ? a->wave[a->ch[2].pos >> 1] : 0xFF;
+			int idx = wave_hit(a);
+			return idx >= 0 ? a->wave[idx] : 0xFF;
 		}
 		return a->wave[addr - ADDR_WAVE];
 	}
@@ -429,8 +441,11 @@ void apu_write(Apu *a, uint16_t addr, uint8_t value) {
 	if (addr >= ADDR_WAVE) {
 		if (!a->ch[2].on) {
 			a->wave[addr - ADDR_WAVE] = value;
-		} else if (a->wave_access) {
-			a->wave[a->ch[2].pos >> 1] = value;
+		} else {
+			int idx = wave_hit(a);
+			if (idx >= 0) {
+				a->wave[idx] = value;
+			}
 		}
 		return;
 	}
