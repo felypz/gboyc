@@ -30,6 +30,7 @@ struct Cartridge {
 	size_t ram_size;
 	bool battery;
 	bool dirty;
+	uint32_t id;
 	Mapper map;
 	char title[17];
 	char save_path[SAVE_PATH_MAX];
@@ -265,6 +266,16 @@ bool cartridge_save(Cartridge *c) {
 	return true;
 }
 
+static uint32_t hash_rom(const uint8_t *data, size_t size) {
+	uint32_t h = 2166136261u;
+
+	for (size_t i = 0; i < size; i++) {
+		h ^= data[i];
+		h *= 16777619u;
+	}
+	return h;
+}
+
 Cartridge *cartridge_load(const char *path) {
 	Cartridge *c = calloc(1, sizeof *c);
 	if (!c) {
@@ -275,6 +286,8 @@ Cartridge *cartridge_load(const char *path) {
 	if (!read_file(path, &c->rom, &file_size) || !parse_header(c, file_size)) {
 		goto fail;
 	}
+
+	c->id = hash_rom(c->rom, file_size);
 
 	if (c->ram_size) {
 		c->ram = calloc(1, c->ram_size);
@@ -332,4 +345,32 @@ void cartridge_write_ram(Cartridge *c, uint16_t addr, uint8_t value) {
 	if (mapper_write_ram(&c->map, c->ram, c->ram_size, addr, value)) {
 		c->dirty = true;
 	}
+}
+
+uint32_t cartridge_id(const Cartridge *c) {
+	return c->id;
+}
+
+size_t cartridge_state_size(const Cartridge *c) {
+	return sizeof c->map + c->ram_size;
+}
+
+void cartridge_state_write(const Cartridge *c, uint8_t *out) {
+	memcpy(out, &c->map, sizeof c->map);
+	if (c->ram_size) {
+		memcpy(out + sizeof c->map, c->ram, c->ram_size);
+	}
+}
+
+bool cartridge_state_read(Cartridge *c, const uint8_t *in, size_t size) {
+	if (size != cartridge_state_size(c)) {
+		return false;
+	}
+
+	memcpy(&c->map, in, sizeof c->map);
+	if (c->ram_size) {
+		memcpy(c->ram, in + sizeof c->map, c->ram_size);
+	}
+	c->dirty = true;
+	return true;
 }

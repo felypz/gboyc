@@ -21,6 +21,11 @@ typedef enum {
 	PLATFORM_EV_DOWN,
 	PLATFORM_EV_CONFIRM,
 	PLATFORM_EV_BACK,
+	PLATFORM_EV_PAUSE,
+	PLATFORM_EV_SPEED,
+	PLATFORM_EV_SAVE_STATE,
+	PLATFORM_EV_LOAD_STATE,
+	PLATFORM_EV_SLOT,
 	PLATFORM_EV_FILE_CHOSEN,
 	PLATFORM_EV_DIALOG_CANCELED,
 	PLATFORM_EV_DIALOG_FAILED,
@@ -28,6 +33,7 @@ typedef enum {
 
 typedef struct {
 	PlatformEventType type;
+	int slot;
 	char path[PLATFORM_PATH_MAX];
 } PlatformEvent;
 
@@ -40,13 +46,15 @@ uint8_t platform_joypad(const Platform *p);
 void platform_set_view(Platform *p, int w, int h);
 
 void platform_clear(Platform *p, uint32_t argb);
+void platform_fill_rect(Platform *p, int x, int y, int w, int h, uint32_t argb);
 void platform_draw_text(Platform *p, int x, int y, int scale, uint32_t argb, const char *text);
 void platform_draw_text_centered(Platform *p, int y, int scale, uint32_t argb, const char *text);
 void platform_flip(Platform *p);
 
 void platform_open_file_dialog(Platform *p);
+bool platform_make_dir(const char *path);
 
-void platform_present(Platform *p, const uint32_t *framebuffer);
+void platform_draw_frame(Platform *p, const uint32_t *framebuffer);
 
 void platform_audio_push(Platform *p, const float *samples, size_t frames);
 void platform_audio_clear(Platform *p);

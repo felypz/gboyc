@@ -137,21 +137,39 @@ void platform_set_view(Platform *p, int w, int h) {
 	p->view_h = h;
 }
 
-static bool map_key(SDL_Keycode key, PlatformEventType *type) {
+static bool map_key(SDL_Keycode key, PlatformEvent *out) {
+	if (key >= SDLK_1 && key <= SDLK_9) {
+		out->type = PLATFORM_EV_SLOT;
+		out->slot = (int)(key - SDLK_1) + 1;
+		return true;
+	}
+
 	switch (key) {
 	case SDLK_UP:
-		*type = PLATFORM_EV_UP;
+		out->type = PLATFORM_EV_UP;
 		return true;
 	case SDLK_DOWN:
-		*type = PLATFORM_EV_DOWN;
+		out->type = PLATFORM_EV_DOWN;
 		return true;
 	case SDLK_RETURN:
 	case SDLK_KP_ENTER:
 	case SDLK_SPACE:
-		*type = PLATFORM_EV_CONFIRM;
+		out->type = PLATFORM_EV_CONFIRM;
 		return true;
 	case SDLK_ESCAPE:
-		*type = PLATFORM_EV_BACK;
+		out->type = PLATFORM_EV_BACK;
+		return true;
+	case SDLK_P:
+		out->type = PLATFORM_EV_PAUSE;
+		return true;
+	case SDLK_TAB:
+		out->type = PLATFORM_EV_SPEED;
+		return true;
+	case SDLK_F5:
+		out->type = PLATFORM_EV_SAVE_STATE;
+		return true;
+	case SDLK_F9:
+		out->type = PLATFORM_EV_LOAD_STATE;
 		return true;
 	default:
 		return false;
@@ -163,6 +181,7 @@ bool platform_next_event(Platform *p, PlatformEvent *out) {
 
 	while (SDL_PollEvent(&ev)) {
 		out->path[0] = '\0';
+		out->slot = 0;
 
 		if (ev.type == p->dialog_event) {
 			char *path = ev.user.data1;
@@ -183,7 +202,7 @@ bool platform_next_event(Platform *p, PlatformEvent *out) {
 			out->type = PLATFORM_EV_QUIT;
 			return true;
 		case SDL_EVENT_KEY_DOWN:
-			if (!ev.key.repeat && map_key(ev.key.key, &out->type)) {
+			if (!ev.key.repeat && map_key(ev.key.key, out)) {
 				return true;
 			}
 			break;
@@ -243,9 +262,20 @@ void platform_open_file_dialog(Platform *p) {
 						   SDL_arraysize(filters), NULL, false);
 }
 
+bool platform_make_dir(const char *path) {
+	return SDL_CreateDirectory(path);
+}
+
 void platform_clear(Platform *p, uint32_t argb) {
 	set_color(p, argb);
 	SDL_RenderClear(p->renderer);
+}
+
+void platform_fill_rect(Platform *p, int x, int y, int w, int h, uint32_t argb) {
+	SDL_FRect rect = {(float)x, (float)y, (float)w, (float)h};
+
+	set_color(p, argb);
+	SDL_RenderFillRect(p->renderer, &rect);
 }
 
 void platform_draw_text(Platform *p, int x, int y, int scale, uint32_t argb, const char *text) {
@@ -264,11 +294,10 @@ void platform_flip(Platform *p) {
 	SDL_RenderPresent(p->renderer);
 }
 
-void platform_present(Platform *p, const uint32_t *framebuffer) {
+void platform_draw_frame(Platform *p, const uint32_t *framebuffer) {
 	SDL_UpdateTexture(p->texture, NULL, framebuffer, GB_SCREEN_W * (int)sizeof(uint32_t));
 	SDL_RenderClear(p->renderer);
 	SDL_RenderTexture(p->renderer, p->texture, NULL, NULL);
-	SDL_RenderPresent(p->renderer);
 }
 
 void platform_audio_push(Platform *p, const float *samples, size_t frames) {

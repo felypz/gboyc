@@ -67,6 +67,8 @@ UiAction ui_handle_event(Ui *ui, Platform *p, const PlatformEvent *ev) {
 			ui->screen = UI_SCREEN_MENU;
 		}
 		break;
+	default:
+		break;
 	}
 	return UI_ACTION_NONE;
 }
