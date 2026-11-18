@@ -6,7 +6,6 @@
 #include <string.h>
 
 #include "apu.h"
-#include "joypad.h"
 
 #define GB_FRAME_NS			   16742706ULL
 #define AUDIO_CHANNELS		   2
@@ -25,21 +24,7 @@ struct Platform {
 	Uint32 dialog_event;
 	int view_w;
 	int view_h;
-};
-
-static const struct {
-	SDL_Scancode key;
-	uint8_t button;
-} KEYMAP[] = {
-	{SDL_SCANCODE_RIGHT, JOY_RIGHT},
-	{SDL_SCANCODE_LEFT, JOY_LEFT},
-	{SDL_SCANCODE_UP, JOY_UP},
-	{SDL_SCANCODE_DOWN, JOY_DOWN},
-	{SDL_SCANCODE_Z, JOY_A},
-	{SDL_SCANCODE_X, JOY_B},
-	{SDL_SCANCODE_BACKSPACE, JOY_SELECT},
-	{SDL_SCANCODE_RSHIFT, JOY_SELECT},
-	{SDL_SCANCODE_RETURN, JOY_START},
+	bool capture;
 };
 
 static void set_color(Platform *p, uint32_t argb) {
@@ -137,6 +122,31 @@ void platform_set_view(Platform *p, int w, int h) {
 	p->view_h = h;
 }
 
+static const char *hotkey_name(SDL_Keycode key) {
+	if (key >= SDLK_1 && key <= SDLK_9) {
+		return "State slot";
+	}
+
+	switch (key) {
+	case SDLK_P:
+		return "Pause";
+	case SDLK_TAB:
+		return "Speed";
+	case SDLK_F5:
+		return "Save state";
+	case SDLK_F9:
+		return "Load state";
+	case SDLK_N:
+		return "Step frame";
+	case SDLK_I:
+		return "Step instruction";
+	case SDLK_C:
+		return "Step cycle";
+	default:
+		return NULL;
+	}
+}
+
 static bool map_key(SDL_Keycode key, PlatformEvent *out) {
 	if (key >= SDLK_1 && key <= SDLK_9) {
 		out->type = PLATFORM_EV_SLOT;
@@ -151,6 +161,12 @@ static bool map_key(SDL_Keycode key, PlatformEvent *out) {
 	case SDLK_DOWN:
 		out->type = PLATFORM_EV_DOWN;
 		return true;
+	case SDLK_LEFT:
+		out->type = PLATFORM_EV_LEFT;
+		return true;
+	case SDLK_RIGHT:
+		out->type = PLATFORM_EV_RIGHT;
+		return true;
 	case SDLK_RETURN:
 	case SDLK_KP_ENTER:
 	case SDLK_SPACE:
@@ -159,17 +175,11 @@ static bool map_key(SDL_Keycode key, PlatformEvent *out) {
 	case SDLK_ESCAPE:
 		out->type = PLATFORM_EV_BACK;
 		return true;
+	case SDLK_DELETE:
+		out->type = PLATFORM_EV_CLEAR;
+		return true;
 	case SDLK_P:
 		out->type = PLATFORM_EV_PAUSE;
-		return true;
-	case SDLK_N:
-		out->type = PLATFORM_EV_STEP_FRAME;
-		return true;
-	case SDLK_I:
-		out->type = PLATFORM_EV_STEP_INSTR;
-		return true;
-	case SDLK_C:
-		out->type = PLATFORM_EV_STEP_CYCLE;
 		return true;
 	case SDLK_TAB:
 		out->type = PLATFORM_EV_SPEED;
@@ -179,6 +189,15 @@ static bool map_key(SDL_Keycode key, PlatformEvent *out) {
 		return true;
 	case SDLK_F9:
 		out->type = PLATFORM_EV_LOAD_STATE;
+		return true;
+	case SDLK_N:
+		out->type = PLATFORM_EV_STEP_FRAME;
+		return true;
+	case SDLK_I:
+		out->type = PLATFORM_EV_STEP_INSTR;
+		return true;
+	case SDLK_C:
+		out->type = PLATFORM_EV_STEP_CYCLE;
 		return true;
 	default:
 		return false;
@@ -196,6 +215,8 @@ bool platform_next_event(Platform *p, PlatformEvent *out) {
 	while (SDL_PollEvent(&ev)) {
 		out->path[0] = '\0';
 		out->slot = 0;
+		out->key = 0;
+		out->hotkey = NULL;
 
 		if (ev.type == p->dialog_event) {
 			char *path = ev.user.data1;
@@ -216,6 +237,19 @@ bool platform_next_event(Platform *p, PlatformEvent *out) {
 			out->type = PLATFORM_EV_QUIT;
 			return true;
 		case SDL_EVENT_KEY_DOWN:
+			if (p->capture) {
+				if (ev.key.repeat) {
+					break;
+				}
+				if (ev.key.key == SDLK_ESCAPE) {
+					out->type = PLATFORM_EV_BACK;
+					return true;
+				}
+				out->type = PLATFORM_EV_KEY_CAPTURED;
+				out->key = (int)ev.key.scancode;
+				out->hotkey = hotkey_name(ev.key.key);
+				return true;
+			}
 			if (map_key(ev.key.key, out) && (!ev.key.repeat || repeats(out->type))) {
 				return true;
 			}
@@ -232,14 +266,43 @@ bool platform_next_event(Platform *p, PlatformEvent *out) {
 	return false;
 }
 
-uint8_t platform_joypad(const Platform *p) {
+void platform_default_keymap(JoyKeymap *keymap) {
+	memset(keymap, 0, sizeof *keymap);
+	keymap->key[0][0] = SDL_SCANCODE_RIGHT;
+	keymap->key[1][0] = SDL_SCANCODE_LEFT;
+	keymap->key[2][0] = SDL_SCANCODE_UP;
+	keymap->key[3][0] = SDL_SCANCODE_DOWN;
+	keymap->key[4][0] = SDL_SCANCODE_Z;
+	keymap->key[5][0] = SDL_SCANCODE_X;
+	keymap->key[6][0] = SDL_SCANCODE_BACKSPACE;
+	keymap->key[6][1] = SDL_SCANCODE_RSHIFT;
+	keymap->key[7][0] = SDL_SCANCODE_RETURN;
+}
+
+const char *platform_key_name(int scancode) {
+	return SDL_GetScancodeName((SDL_Scancode)scancode);
+}
+
+bool platform_key_valid(int scancode) {
+	return scancode >= 0 && scancode < SDL_SCANCODE_COUNT;
+}
+
+void platform_capture_keys(Platform *p, bool on) {
+	p->capture = on;
+}
+
+uint8_t platform_joypad(const Platform *p, const JoyKeymap *keymap) {
 	(void)p;
 	const bool *keys = SDL_GetKeyboardState(NULL);
 	uint8_t mask = 0;
 
-	for (size_t i = 0; i < SDL_arraysize(KEYMAP); i++) {
-		if (keys[KEYMAP[i].key]) {
-			mask |= KEYMAP[i].button;
+	for (int b = 0; b < JOY_BUTTONS; b++) {
+		for (int s = 0; s < JOY_KEY_SLOTS; s++) {
+			int scancode = keymap->key[b][s];
+
+			if (scancode > 0 && platform_key_valid(scancode) && keys[scancode]) {
+				mask |= (uint8_t)(1u << b);
+			}
 		}
 	}
 	return mask;
@@ -266,14 +329,18 @@ static void SDLCALL on_file_dialog(void *userdata, const char *const *filelist, 
 	}
 }
 
-void platform_open_file_dialog(Platform *p) {
-	static const SDL_DialogFileFilter filters[] = {
+void platform_open_file_dialog(Platform *p, bool boot) {
+	static const SDL_DialogFileFilter rom_filters[] = {
 		{"Game Boy ROMs", "gb;gbc"},
 		{"All files", "*"},
 	};
+	static const SDL_DialogFileFilter boot_filters[] = {
+		{"Boot ROM", "bin"},
+		{"All files", "*"},
+	};
 
-	SDL_ShowOpenFileDialog(on_file_dialog, (void *)(uintptr_t)p->dialog_event, p->window, filters,
-						   SDL_arraysize(filters), NULL, false);
+	SDL_ShowOpenFileDialog(on_file_dialog, (void *)(uintptr_t)p->dialog_event, p->window,
+						   boot ? boot_filters : rom_filters, 2, NULL, false);
 }
 
 bool platform_make_dir(const char *path) {

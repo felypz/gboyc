@@ -8,6 +8,7 @@
 #include "gb.h"
 #include "palette.h"
 #include "platform.h"
+#include "settings.h"
 #include "state.h"
 #include "stepper.h"
 #include "ui.h"
@@ -26,6 +27,7 @@ static Ui ui;
 static Gb gb;
 static Stepper stepper;
 static Cartridge *cart;
+static Settings settings;
 static char rom_path[PLATFORM_PATH_MAX];
 static int slot = 1;
 static bool paused;
@@ -93,7 +95,9 @@ static bool start_game(const char *path) {
 	}
 
 	uint8_t boot[BOOT_ROM_SIZE];
-	gb_init(&gb, cart, boot_load(boot) ? boot : NULL);
+	bool use_boot = settings.boot_enabled && boot_load(settings.boot_file, boot);
+
+	gb_init(&gb, cart, use_boot ? boot : NULL);
 	snprintf(rom_path, sizeof rom_path, "%s", path);
 	paused = false;
 	speed = 1;
@@ -107,7 +111,7 @@ static void back_to_menu(Platform *plat) {
 	unload_game();
 	platform_audio_clear(plat);
 	app_state = APP_MENU;
-	ui_init(&ui);
+	ui_init(&ui, &settings);
 	platform_set_view(plat, UI_VIEW_W, UI_VIEW_H);
 }
 
@@ -173,7 +177,7 @@ static void step(Platform *plat, PlatformEventType type) {
 		return;
 	}
 	if (!stepper.pending) {
-		gb_set_joypad(&gb, platform_joypad(plat));
+		gb_set_joypad(&gb, platform_joypad(plat, &settings.keymap));
 	}
 
 	switch (type) {
@@ -227,7 +231,7 @@ static bool handle_running_event(Platform *plat, const PlatformEvent *ev) {
 }
 
 static void run_emulation(Platform *plat, unsigned *frames) {
-	gb_set_joypad(&gb, platform_joypad(plat));
+	gb_set_joypad(&gb, platform_joypad(plat, &settings.keymap));
 	for (int i = 0; i < speed; i++) {
 		gb_run_frame(&gb);
 	}
@@ -239,12 +243,14 @@ static void run_emulation(Platform *plat, unsigned *frames) {
 }
 
 int main(void) {
+	settings_load(&settings);
+
 	Platform *plat = platform_create("gboyc", 4);
 	if (!plat) {
 		return EXIT_FAILURE;
 	}
 
-	ui_init(&ui);
+	ui_init(&ui, &settings);
 
 	bool running = true;
 	unsigned frames = 0;
