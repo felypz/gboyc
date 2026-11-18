@@ -11,6 +11,7 @@ typedef struct {
 	uint8_t bits;
 	uint16_t counter;
 	bool active;
+	bool quiet;
 } Serial;
 
 void serial_reset(Serial *s);

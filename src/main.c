@@ -9,6 +9,7 @@
 #include "palette.h"
 #include "platform.h"
 #include "state.h"
+#include "stepper.h"
 #include "ui.h"
 
 #define AUTOSAVE_FRAMES 300
@@ -23,6 +24,7 @@ typedef enum {
 static AppState app_state = APP_MENU;
 static Ui ui;
 static Gb gb;
+static Stepper stepper;
 static Cartridge *cart;
 static char rom_path[PLATFORM_PATH_MAX];
 static int slot = 1;
@@ -47,6 +49,18 @@ static void draw_label(Platform *plat, int x, int y, const char *text) {
 	platform_draw_text(plat, x + 2, y + 2, 1, DMG_COLOR_3, text);
 }
 
+static void draw_pause_labels(Platform *plat) {
+	char pc[32];
+
+	draw_label(plat, 0, GB_SCREEN_H - 12, "PAUSED");
+	if (stepper.pending) {
+		snprintf(pc, sizeof pc, "PC %04X c%u", (unsigned)gb.cpu.pc, stepper.cycles);
+	} else {
+		snprintf(pc, sizeof pc, "PC %04X", (unsigned)gb.cpu.pc);
+	}
+	draw_label(plat, GB_SCREEN_W - ((int)strlen(pc) * 8 + 4), GB_SCREEN_H - 12, pc);
+}
+
 static void draw_overlay(Platform *plat) {
 	if (osd_frames) {
 		draw_label(plat, 0, 0, osd);
@@ -59,11 +73,12 @@ static void draw_overlay(Platform *plat) {
 		draw_label(plat, GB_SCREEN_W - ((int)strlen(tag) * 8 + 4), 0, tag);
 	}
 	if (paused) {
-		draw_label(plat, 0, GB_SCREEN_H - 12, "PAUSED");
+		draw_pause_labels(plat);
 	}
 }
 
 static void unload_game(void) {
+	stepper_discard(&stepper);
 	cartridge_free(cart);
 	cart = NULL;
 	gb.cart = NULL;
@@ -114,6 +129,7 @@ static void push_audio(Platform *plat) {
 static void save_state(void) {
 	char path[STATE_PATH_MAX];
 
+	stepper_commit(&stepper, &gb);
 	if (!platform_make_dir(STATE_DIR)) {
 		osd_show("Dir error");
 		return;
@@ -130,6 +146,7 @@ static void load_state(Platform *plat) {
 
 	switch (state_load(&gb, path)) {
 	case STATE_OK:
+		stepper_discard(&stepper);
 		platform_audio_clear(plat);
 		drain_audio();
 		osd_show("Loaded slot %d", slot);
@@ -143,6 +160,36 @@ static void load_state(Platform *plat) {
 	}
 }
 
+static void toggle_pause(Platform *plat) {
+	stepper_commit(&stepper, &gb);
+	paused = !paused;
+	platform_audio_clear(plat);
+	drain_audio();
+}
+
+static void step(Platform *plat, PlatformEventType type) {
+	if (!paused) {
+		osd_show("Press P to pause");
+		return;
+	}
+	if (!stepper.pending) {
+		gb_set_joypad(&gb, platform_joypad(plat));
+	}
+
+	switch (type) {
+	case PLATFORM_EV_STEP_FRAME:
+		stepper_frame(&stepper, &gb);
+		break;
+	case PLATFORM_EV_STEP_INSTR:
+		stepper_instruction(&stepper, &gb);
+		break;
+	default:
+		stepper_cycle(&stepper, &gb);
+		break;
+	}
+	drain_audio();
+}
+
 static bool handle_running_event(Platform *plat, const PlatformEvent *ev) {
 	switch (ev->type) {
 	case PLATFORM_EV_QUIT:
@@ -151,8 +198,7 @@ static bool handle_running_event(Platform *plat, const PlatformEvent *ev) {
 		back_to_menu(plat);
 		break;
 	case PLATFORM_EV_PAUSE:
-		paused = !paused;
-		platform_audio_clear(plat);
+		toggle_pause(plat);
 		break;
 	case PLATFORM_EV_SPEED:
 		speed = (speed == 1) ? FAST_SPEED : 1;
@@ -168,6 +214,11 @@ static bool handle_running_event(Platform *plat, const PlatformEvent *ev) {
 		break;
 	case PLATFORM_EV_LOAD_STATE:
 		load_state(plat);
+		break;
+	case PLATFORM_EV_STEP_FRAME:
+	case PLATFORM_EV_STEP_INSTR:
+	case PLATFORM_EV_STEP_CYCLE:
+		step(plat, ev->type);
 		break;
 	default:
 		break;
@@ -236,6 +287,7 @@ int main(void) {
 	}
 
 	unload_game();
+	stepper_free(&stepper);
 	platform_destroy(plat);
 	return EXIT_SUCCESS;
 }

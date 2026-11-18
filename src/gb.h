@@ -1,6 +1,7 @@
 #ifndef GBOYC_GB_H
 #define GBOYC_GB_H
 
+#include <setjmp.h>
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -27,6 +28,12 @@ typedef struct {
 	uint16_t src;
 } Dma;
 
+typedef struct {
+	jmp_buf *abort;
+	unsigned limit;
+	unsigned count;
+} GbStep;
+
 typedef struct Gb {
 	Cpu cpu;
 	Timer timer;
@@ -42,9 +49,11 @@ typedef struct Gb {
 	uint8_t hram[0x7F];
 	uint8_t io[0x80];
 	uint8_t ie;
+	GbStep step;
 } Gb;
 
 void gb_init(Gb *gb, Cartridge *cart, const uint8_t *boot);
+void gb_cycle_begin(Gb *gb);
 void gb_tick(Gb *gb);
 void gb_run_frame(Gb *gb);
 void gb_set_joypad(Gb *gb, uint8_t mask);

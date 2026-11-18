@@ -162,6 +162,15 @@ static bool map_key(SDL_Keycode key, PlatformEvent *out) {
 	case SDLK_P:
 		out->type = PLATFORM_EV_PAUSE;
 		return true;
+	case SDLK_N:
+		out->type = PLATFORM_EV_STEP_FRAME;
+		return true;
+	case SDLK_I:
+		out->type = PLATFORM_EV_STEP_INSTR;
+		return true;
+	case SDLK_C:
+		out->type = PLATFORM_EV_STEP_CYCLE;
+		return true;
 	case SDLK_TAB:
 		out->type = PLATFORM_EV_SPEED;
 		return true;
@@ -174,6 +183,11 @@ static bool map_key(SDL_Keycode key, PlatformEvent *out) {
 	default:
 		return false;
 	}
+}
+
+static bool repeats(PlatformEventType type) {
+	return type == PLATFORM_EV_STEP_FRAME || type == PLATFORM_EV_STEP_INSTR ||
+		   type == PLATFORM_EV_STEP_CYCLE;
 }
 
 bool platform_next_event(Platform *p, PlatformEvent *out) {
@@ -202,7 +216,7 @@ bool platform_next_event(Platform *p, PlatformEvent *out) {
 			out->type = PLATFORM_EV_QUIT;
 			return true;
 		case SDL_EVENT_KEY_DOWN:
-			if (!ev.key.repeat && map_key(ev.key.key, out)) {
+			if (map_key(ev.key.key, out) && (!ev.key.repeat || repeats(out->type))) {
 				return true;
 			}
 			break;

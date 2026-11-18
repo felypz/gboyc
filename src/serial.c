@@ -27,7 +27,12 @@ bool serial_step(Serial *s) {
 
 	s->active = false;
 	s->sc &= 0x7F;
-	putchar(s->out);
+
+	if (!s->quiet) {
+		putchar(s->out);
+		fflush(stdout);
+	}
+
 	fflush(stdout);
 	return true;
 }

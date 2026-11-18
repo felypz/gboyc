@@ -123,3 +123,9 @@ const uint32_t *gb_framebuffer(const Gb *gb) {
 size_t gb_take_audio(Gb *gb, const float **samples) {
 	return apu_take_samples(&gb->apu, samples);
 }
+
+void gb_cycle_begin(Gb *gb) {
+	if (gb->step.abort && gb->step.count++ == gb->step.limit) {
+		longjmp(*gb->step.abort, 1);
+	}
+}

@@ -35,6 +35,7 @@ static uint8_t flags(bool z, bool n, bool h, bool cy) {
 }
 
 static void tick(Cpu *cpu) {
+	gb_cycle_begin(cpu->gb);
 	gb_tick(cpu->gb);
 }
 
@@ -57,13 +58,14 @@ static uint8_t mcycle(Cpu *cpu, Access acc, uint16_t addr, uint8_t value, bool i
 					  uint16_t idu_addr) {
 	uint8_t result = 0;
 
+	gb_cycle_begin(cpu->gb);
 	oam_bug(cpu, acc, addr, idu, idu_addr);
 	if (acc == ACC_READ) {
 		result = bus_read(cpu->gb, addr);
 	} else if (acc == ACC_WRITE) {
 		bus_write(cpu->gb, addr, value);
 	}
-	tick(cpu);
+	gb_tick(cpu->gb);
 	return result;
 }
 
