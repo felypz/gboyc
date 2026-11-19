@@ -9,16 +9,13 @@
 #define SETTINGS_PATH	  "config/settings.cfg"
 #define DEFAULT_BOOT_FILE "dmg_boot.bin"
 
-static const char *const BUTTON_NAMES[JOY_BUTTONS] = {
-	"right", "left", "up", "down", "a", "b", "select", "start",
-};
-
 void settings_defaults(Settings *s) {
 	memset(s, 0, sizeof *s);
 	s->boot_enabled = true;
-	s->theme = THEME_AUTO;
 	snprintf(s->boot_file, sizeof s->boot_file, "%s", DEFAULT_BOOT_FILE);
-	platform_default_keymap(&s->keymap);
+	s->theme = THEME_AUTO;
+	platform_default_pad(&s->bindings);
+	platform_default_shortcuts(&s->bindings);
 }
 
 static bool valid_file_name(const char *name) {
@@ -26,23 +23,6 @@ static bool valid_file_name(const char *name) {
 
 	return len > 0 && len < SETTINGS_NAME_MAX && name[0] != '.' && !strchr(name, '/') &&
 		   !strchr(name, '\\');
-}
-
-static void parse_keys(Settings *s, const char *button, const char *value) {
-	int first;
-	int second;
-
-	if (sscanf(value, "%d,%d", &first, &second) != 2 || !platform_key_valid(first) ||
-		!platform_key_valid(second)) {
-		return;
-	}
-
-	for (int i = 0; i < JOY_BUTTONS; i++) {
-		if (strcmp(button, BUTTON_NAMES[i]) == 0) {
-			s->keymap.key[i][0] = first;
-			s->keymap.key[i][1] = second;
-		}
-	}
 }
 
 static void parse_line(Settings *s, char *line) {
@@ -66,8 +46,8 @@ static void parse_line(Settings *s, char *line) {
 		}
 	} else if (strcmp(name, "theme") == 0) {
 		s->theme = theme_mode_parse(value);
-	} else if (strncmp(name, "joy.", 4) == 0) {
-		parse_keys(s, name + 4, value);
+	} else {
+		bindings_parse(&s->bindings, name, value);
 	}
 }
 
@@ -102,10 +82,7 @@ bool settings_save(const Settings *s) {
 
 	fprintf(f, "boot=%s\nboot_file=%s\ntheme=%s\n", s->boot_enabled ? "on" : "off", s->boot_file,
 			theme_mode_key(s->theme));
-
-	for (int i = 0; i < JOY_BUTTONS; i++) {
-		fprintf(f, "joy.%s=%d,%d\n", BUTTON_NAMES[i], s->keymap.key[i][0], s->keymap.key[i][1]);
-	}
+	bindings_write(&s->bindings, f);
 
 	bool ok = fclose(f) == 0 && rename(tmp, SETTINGS_PATH) == 0;
 	if (!ok) {

@@ -374,3 +374,16 @@ bool cartridge_state_read(Cartridge *c, const uint8_t *in, size_t size) {
 	c->dirty = true;
 	return true;
 }
+
+void cartridge_reset(Cartridge *c) {
+	Mapper old = c->map;
+
+	memset(&c->map, 0, sizeof c->map);
+	c->map.type = old.type;
+	c->map.multicart = old.multicart;
+	c->map.has_timer = old.has_timer;
+	c->map.rumble = old.rumble;
+	c->map.rom_size = old.rom_size;
+	mapper_reset(&c->map);
+	c->map.rtc = old.rtc;
+}

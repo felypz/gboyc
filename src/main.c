@@ -3,10 +3,10 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "bindings.h"
 #include "boot.h"
 #include "cartridge.h"
 #include "gb.h"
-#include "palette.h"
 #include "platform.h"
 #include "settings.h"
 #include "state.h"
@@ -23,11 +23,13 @@ typedef enum {
 } AppState;
 
 static AppState app_state = APP_MENU;
+static bool menu_open;
+static bool cursor_visible = true;
+static Settings settings;
 static Ui ui;
 static Gb gb;
 static Stepper stepper;
 static Cartridge *cart;
-static Settings settings;
 static char rom_path[PLATFORM_PATH_MAX];
 static int slot = 1;
 static bool paused;
@@ -44,39 +46,20 @@ static void osd_show(const char *fmt, ...) {
 	osd_frames = OSD_FRAMES;
 }
 
-static void draw_label(Platform *plat, int x, int y, const char *text) {
-	int w = (int)strlen(text) * 8 + 4;
+static void draw_hud(Platform *plat) {
+	Hud hud = {
+		.toast = osd_frames ? osd : NULL,
+		.speed = speed,
+		.paused = paused,
+		.pc = gb.cpu.pc,
+		.mid_instruction = stepper.pending,
+		.cycles = stepper.cycles,
+	};
 
-	platform_fill_rect(plat, x, y, w, 12, DMG_COLOR_0);
-	platform_draw_text(plat, x + 2, y + 2, 1, DMG_COLOR_3, text);
-}
-
-static void draw_pause_labels(Platform *plat) {
-	char pc[32];
-
-	draw_label(plat, 0, GB_SCREEN_H - 12, "PAUSED");
-	if (stepper.pending) {
-		snprintf(pc, sizeof pc, "PC %04X c%u", (unsigned)gb.cpu.pc, stepper.cycles);
-	} else {
-		snprintf(pc, sizeof pc, "PC %04X", (unsigned)gb.cpu.pc);
-	}
-	draw_label(plat, GB_SCREEN_W - ((int)strlen(pc) * 8 + 4), GB_SCREEN_H - 12, pc);
-}
-
-static void draw_overlay(Platform *plat) {
 	if (osd_frames) {
-		draw_label(plat, 0, 0, osd);
 		osd_frames--;
 	}
-	if (speed > 1) {
-		char tag[16];
-
-		snprintf(tag, sizeof tag, "%dx", speed);
-		draw_label(plat, GB_SCREEN_W - ((int)strlen(tag) * 8 + 4), 0, tag);
-	}
-	if (paused) {
-		draw_pause_labels(plat);
-	}
+	ui_draw_hud(&ui, plat, &hud);
 }
 
 static void unload_game(void) {
@@ -86,18 +69,25 @@ static void unload_game(void) {
 	gb.cart = NULL;
 }
 
-static bool start_game(const char *path) {
-	unload_game();
-
-	cart = cartridge_load(path);
-	if (!cart) {
-		return false;
-	}
-
+static void init_gb(void) {
 	uint8_t boot[BOOT_ROM_SIZE];
 	bool use_boot = settings.boot_enabled && boot_load(settings.boot_file, boot);
 
 	gb_init(&gb, cart, use_boot ? boot : NULL);
+}
+
+static bool start_game(const char *path) {
+	cartridge_save(cart);
+
+	Cartridge *loaded = cartridge_load(path);
+
+	if (!loaded) {
+		return false;
+	}
+
+	unload_game();
+	cart = loaded;
+	init_gb();
 	snprintf(rom_path, sizeof rom_path, "%s", path);
 	paused = false;
 	speed = 1;
@@ -107,12 +97,39 @@ static bool start_game(const char *path) {
 	return true;
 }
 
-static void back_to_menu(Platform *plat) {
+static void reset_game(Platform *plat) {
+	stepper_discard(&stepper);
+	cartridge_save(cart);
+	cartridge_reset(cart);
+	init_gb();
+	paused = false;
+	platform_audio_clear(plat);
+	osd_show("Reset");
+}
+
+static void enter_game(Platform *plat) {
+	app_state = APP_RUNNING;
+	menu_open = false;
+	platform_audio_clear(plat);
+}
+
+static void open_menu(Platform *plat) {
+	menu_open = true;
+	ui_open_pause(&ui);
+	platform_audio_clear(plat);
+}
+
+static void close_menu(Platform *plat) {
+	menu_open = false;
+	platform_audio_clear(plat);
+}
+
+static void back_to_main(Platform *plat) {
 	unload_game();
+	menu_open = false;
 	platform_audio_clear(plat);
 	app_state = APP_MENU;
 	ui_init(&ui, &settings);
-	platform_set_view(plat, UI_VIEW_W, UI_VIEW_H);
 }
 
 static void drain_audio(void) {
@@ -171,20 +188,20 @@ static void toggle_pause(Platform *plat) {
 	drain_audio();
 }
 
-static void step(Platform *plat, PlatformEventType type) {
+static void step(Platform *plat, ShortcutAction action) {
 	if (!paused) {
-		osd_show("Press P to pause");
+		osd_show("Pause to step");
 		return;
 	}
 	if (!stepper.pending) {
-		gb_set_joypad(&gb, platform_joypad(plat, &settings.keymap));
+		gb_set_joypad(&gb, platform_joypad(plat, &settings.bindings));
 	}
 
-	switch (type) {
-	case PLATFORM_EV_STEP_FRAME:
+	switch (action) {
+	case SC_STEP_FRAME:
 		stepper_frame(&stepper, &gb);
 		break;
-	case PLATFORM_EV_STEP_INSTR:
+	case SC_STEP_INSTR:
 		stepper_instruction(&stepper, &gb);
 		break;
 	default:
@@ -194,44 +211,102 @@ static void step(Platform *plat, PlatformEventType type) {
 	drain_audio();
 }
 
-static bool handle_running_event(Platform *plat, const PlatformEvent *ev) {
-	switch (ev->type) {
-	case PLATFORM_EV_QUIT:
-		return false;
-	case PLATFORM_EV_BACK:
-		back_to_menu(plat);
-		break;
-	case PLATFORM_EV_PAUSE:
+static void handle_shortcut(Platform *plat, ShortcutAction action) {
+	switch (action) {
+	case SC_PAUSE:
 		toggle_pause(plat);
 		break;
-	case PLATFORM_EV_SPEED:
+	case SC_SPEED:
 		speed = (speed == 1) ? FAST_SPEED : 1;
 		platform_audio_clear(plat);
 		osd_show("Speed %dx", speed);
 		break;
-	case PLATFORM_EV_SLOT:
-		slot = ev->slot;
-		osd_show("Slot %d", slot);
+	case SC_RESET:
+		reset_game(plat);
 		break;
-	case PLATFORM_EV_SAVE_STATE:
+	case SC_SAVE_STATE:
 		save_state();
 		break;
-	case PLATFORM_EV_LOAD_STATE:
+	case SC_LOAD_STATE:
 		load_state(plat);
 		break;
-	case PLATFORM_EV_STEP_FRAME:
-	case PLATFORM_EV_STEP_INSTR:
-	case PLATFORM_EV_STEP_CYCLE:
-		step(plat, ev->type);
+	case SC_STEP_FRAME:
+	case SC_STEP_INSTR:
+	case SC_STEP_CYCLE:
+		step(plat, action);
 		break;
 	default:
+		break;
+	}
+}
+
+static bool handle_running_event(Platform *plat, const PlatformEvent *ev) {
+	switch (ev->type) {
+	case PLATFORM_EV_QUIT:
+		return false;
+	case PLATFORM_EV_THEME_CHANGED:
+		ui.system_dark = platform_system_dark();
+		return true;
+	case PLATFORM_EV_BACK:
+		if (!ev->repeat) {
+			open_menu(plat);
+		}
+		return true;
+	default:
+		break;
+	}
+
+	if (ev->key <= 0) {
+		return true;
+	}
+
+	int slot_key = platform_slot_for_key(ev->key);
+
+	if (slot_key) {
+		if (!ev->repeat) {
+			slot = slot_key;
+			osd_show("Slot %d", slot);
+		}
+		return true;
+	}
+
+	int action = bindings_shortcut_for_key(&settings.bindings, ev->key);
+
+	if (action >= 0 && (!ev->repeat || action == SC_STEP_FRAME)) {
+		handle_shortcut(plat, (ShortcutAction)action);
+	}
+	return true;
+}
+
+static bool handle_ui_event(Platform *plat, const PlatformEvent *ev) {
+	switch (ui_handle_event(&ui, plat, ev)) {
+	case UI_ACTION_QUIT:
+		return false;
+	case UI_ACTION_LOAD_ROM:
+		if (start_game(ui.rom_path)) {
+			enter_game(plat);
+		} else {
+			ui_notify(&ui, "Invalid or unsupported ROM", true);
+		}
+		break;
+	case UI_ACTION_RESUME:
+		close_menu(plat);
+		break;
+	case UI_ACTION_RESET:
+		reset_game(plat);
+		close_menu(plat);
+		break;
+	case UI_ACTION_MAIN_MENU:
+		back_to_main(plat);
+		break;
+	case UI_ACTION_NONE:
 		break;
 	}
 	return true;
 }
 
 static void run_emulation(Platform *plat, unsigned *frames) {
-	gb_set_joypad(&gb, platform_joypad(plat, &settings.keymap));
+	gb_set_joypad(&gb, platform_joypad(plat, &settings.bindings));
 	for (int i = 0; i < speed; i++) {
 		gb_run_frame(&gb);
 	}
@@ -239,6 +314,15 @@ static void run_emulation(Platform *plat, unsigned *frames) {
 
 	if (++*frames % AUTOSAVE_FRAMES == 0) {
 		cartridge_save(cart);
+	}
+}
+
+static void update_cursor(Platform *plat) {
+	bool want = app_state == APP_MENU || menu_open;
+
+	if (want != cursor_visible) {
+		platform_show_cursor(plat, want);
+		cursor_visible = want;
 	}
 }
 
@@ -259,37 +343,32 @@ int main(void) {
 		PlatformEvent ev;
 
 		while (platform_next_event(plat, &ev)) {
-			if (app_state == APP_MENU) {
-				switch (ui_handle_event(&ui, plat, &ev)) {
-				case UI_ACTION_QUIT:
-					running = false;
-					break;
-				case UI_ACTION_LOAD_ROM:
-					if (start_game(ui.rom_path)) {
-						app_state = APP_RUNNING;
-						platform_audio_clear(plat);
-						platform_set_view(plat, GB_SCREEN_W, GB_SCREEN_H);
-					}
-					break;
-				case UI_ACTION_NONE:
-					break;
-				}
-			} else if (!handle_running_event(plat, &ev)) {
+			bool keep = (app_state == APP_MENU || menu_open) ? handle_ui_event(plat, &ev)
+															 : handle_running_event(plat, &ev);
+
+			if (!keep) {
 				running = false;
 			}
 		}
 
+		update_cursor(plat);
+
 		if (app_state == APP_MENU) {
 			ui_draw(&ui, plat);
 		} else {
-			if (!paused) {
+			if (!paused && !menu_open) {
 				run_emulation(plat, &frames);
 			}
 			platform_set_background(plat, 0xFF000000);
 			platform_draw_frame(plat, gb_framebuffer(&gb));
-			draw_overlay(plat);
-			platform_flip(plat);
+			if (menu_open) {
+				ui_draw(&ui, plat);
+			} else {
+				draw_hud(plat);
+			}
 		}
+
+		platform_flip(plat);
 		platform_frame_limit(plat);
 	}
 

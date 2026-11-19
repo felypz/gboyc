@@ -3,6 +3,7 @@
 #include <stdio.h>
 #include <string.h>
 
+#include "bindings.h"
 #include "boot.h"
 #include "palette.h"
 #include "theme.h"
@@ -15,59 +16,111 @@
 #define SCALE_BODY	  2
 #define SCALE_CAPTION 1
 
-#define MARGIN_X	  64
-#define CONTENT_W	  (UI_VIEW_W - 2 * MARGIN_X)
-#define HEADER_LINE_Y 72
-#define LIST_Y		  112
-#define HERO_LIST_Y	  250
-#define ROW_H		  40
-#define ROW_PITCH	  48
-#define ROW_PAD		  16
-#define PAD_ROW_H	  32
-#define PAD_ROW_PITCH 36
-#define PAD_COL_X	  (MARGIN_X + 128)
-#define PAD_CELL_W	  168
-#define PAD_CELL_GAP  8
-#define STATUS_Y	  480
-#define STATUS_H	  32
-#define FOOTER_LINE_Y 524
-#define HINT_Y		  542
+#define MARGIN_X		64
+#define CONTENT_W		(UI_VIEW_W - 2 * MARGIN_X)
+#define HEADER_LINE_Y	72
+#define LIST_Y			112
+#define HERO_LIST_Y		250
+#define ROW_H			40
+#define ROW_PITCH		48
+#define ROW_PAD			16
+#define PAD_ROW_H		32
+#define PAD_ROW_PITCH	36
+#define PAD_COL_X		(MARGIN_X + 128)
+#define PAD_CELL_W		168
+#define PAD_CELL_GAP	8
+#define SHORTCUT_CELL_X (MARGIN_X + CONTENT_W - ROW_PAD - PAD_CELL_W)
+#define STATUS_Y		480
+#define STATUS_H		32
+#define FOOTER_LINE_Y	524
+#define HINT_Y			542
+#define OVERLAY_ALPHA	0xB4000000u
 
-#define MENU_COUNT	  3
-#define MENU_SETTINGS 1
-#define MENU_QUIT	  2
+#define HUD_MARGIN 20
+#define HUD_CHIP_H 32
+#define HUD_PAD	   14
+#define HUD_ALPHA  0xE6000000u
 
-#define SETTINGS_COUNT 5
-#define SET_BOOT	   0
-#define SET_BOOT_FILE  1
-#define SET_JOYPAD	   2
-#define SET_THEME	   3
+enum {
+	MENU_LOAD_ROM,
+	MENU_SETTINGS,
+	MENU_QUIT,
+	MENU_COUNT,
+};
+
+enum {
+	SET_BOOT,
+	SET_BOOT_FILE,
+	SET_CONTROLS,
+	SET_SHORTCUTS,
+	SET_THEME,
+	SET_BACK,
+	SETTINGS_COUNT,
+};
+
+enum {
+	PAUSE_CONTINUE,
+	PAUSE_RESET,
+	PAUSE_CONTROLS,
+	PAUSE_SHORTCUTS,
+	PAUSE_LOAD,
+	PAUSE_MAIN,
+	PAUSE_COUNT,
+};
 
 #define PAD_ROWS  (JOY_BUTTONS + 2)
 #define PAD_RESET JOY_BUTTONS
 #define PAD_BACK  (JOY_BUTTONS + 1)
+
+#define SHORTCUT_ROWS	   (SC_COUNT + 2)
+#define SHORTCUT_RESET_ROW SC_COUNT
+#define SHORTCUT_BACK_ROW  (SC_COUNT + 1)
 
 typedef struct {
 	const char *key;
 	const char *label;
 } Hint;
 
-static const char *const MENU_LABELS[MENU_COUNT] = {"Load ROM", "Settings", "Quit"};
+typedef struct {
+	int y0;
+	int pitch;
+	int h;
+	int count;
+} ListGeom;
 
-static const struct {
-	const char *name;
-	int index;
-} PAD_BUTTONS[JOY_BUTTONS] = {
-	{"Up", 2}, {"Down", 3}, {"Left", 1},   {"Right", 0},
-	{"A", 4},  {"B", 5},	{"Select", 6}, {"Start", 7},
-};
+static const char *const MENU_LABELS[MENU_COUNT] = {"Load ROM", "Settings", "Quit"};
+static const char *const PAUSE_LABELS[PAUSE_COUNT] = {
+	"Continue", "Reset", "Game controls", "Emulator shortcuts", "Load ROM", "Main menu"};
+static const char *const PAUSE_VALUES[PAUSE_COUNT] = {NULL, NULL, ">", ">", NULL, NULL};
+
+static const int PAD_ORDER[JOY_BUTTONS] = {2, 3, 1, 0, 4, 5, 6, 7};
 
 static const Hint HINTS_MENU[] = {{"UP/DOWN", "Select"}, {"ENTER", "Open"}};
+static const Hint HINTS_PAUSE[] = {{"UP/DOWN", "Select"}, {"ENTER", "Open"}, {"ESC", "Resume"}};
 static const Hint HINTS_SETTINGS[] = {
 	{"UP/DOWN", "Select"}, {"L/R", "Adjust"}, {"ENTER", "Open"}, {"ESC", "Back"}};
-static const Hint HINTS_JOYPAD[] = {
+static const Hint HINTS_CONTROLS[] = {
 	{"UP/DOWN", "Select"}, {"L/R", "Slot"}, {"ENTER", "Rebind"}, {"DEL", "Clear"}, {"ESC", "Back"}};
+static const Hint HINTS_SHORTCUTS[] = {
+	{"UP/DOWN", "Select"}, {"ENTER", "Rebind"}, {"DEL", "Clear"}, {"ESC", "Back"}};
 static const Hint HINTS_CAPTURE[] = {{"KEY", "Bind"}, {"ESC", "Cancel"}};
+
+static ListGeom geom(UiScreen screen) {
+	switch (screen) {
+	case UI_SCREEN_MENU:
+		return (ListGeom){HERO_LIST_Y, ROW_PITCH, ROW_H, MENU_COUNT};
+	case UI_SCREEN_SETTINGS:
+		return (ListGeom){LIST_Y, ROW_PITCH, ROW_H, SETTINGS_COUNT};
+	case UI_SCREEN_CONTROLS:
+		return (ListGeom){LIST_Y, PAD_ROW_PITCH, PAD_ROW_H, PAD_ROWS};
+	case UI_SCREEN_SHORTCUTS:
+		return (ListGeom){LIST_Y, PAD_ROW_PITCH, PAD_ROW_H, SHORTCUT_ROWS};
+	case UI_SCREEN_PAUSE:
+		return (ListGeom){LIST_Y, ROW_PITCH, ROW_H, PAUSE_COUNT};
+	default:
+		return (ListGeom){0, 1, 0, 0};
+	}
+}
 
 static void set_status(Ui *ui, const char *text, bool warn) {
 	snprintf(ui->status, sizeof ui->status, "%s", text);
@@ -80,13 +133,19 @@ static void save(Ui *ui) {
 	}
 }
 
-static const char *button_name(int index) {
-	for (int i = 0; i < JOY_BUTTONS; i++) {
-		if (PAD_BUTTONS[i].index == index) {
-			return PAD_BUTTONS[i].name;
-		}
+static void go(Ui *ui, UiScreen screen) {
+	ui->sel[ui->screen] = ui->row;
+	ui->screen = screen;
+	ui->row = ui->sel[screen];
+	ui->status[0] = '\0';
+}
+
+static void move(Ui *ui, int dir) {
+	int n = geom(ui->screen).count;
+
+	if (n > 0) {
+		ui->row = (ui->row + n + dir) % n;
 	}
-	return "?";
 }
 
 static void key_label(int scancode, char *out, size_t size) {
@@ -117,25 +176,42 @@ void ui_init(Ui *ui, Settings *settings) {
 	ui->system_dark = platform_system_dark();
 }
 
+void ui_open_pause(Ui *ui) {
+	Settings *settings = ui->settings;
+
+	memset(ui, 0, sizeof *ui);
+	ui->settings = settings;
+	ui->system_dark = platform_system_dark();
+	ui->screen = UI_SCREEN_PAUSE;
+	ui->in_game = true;
+}
+
+void ui_notify(Ui *ui, const char *text, bool warn) {
+	set_status(ui, text, warn);
+}
+
 static void open_settings(Ui *ui) {
-	ui->screen = UI_SCREEN_SETTINGS;
-	ui->row = 0;
-	ui->status[0] = '\0';
+	go(ui, UI_SCREEN_SETTINGS);
 	ui->boot_ok = boot_check(ui->settings->boot_file);
 }
 
-static void open_joypad(Ui *ui) {
-	ui->screen = UI_SCREEN_JOYPAD;
-	ui->row = 0;
+static void open_controls(Ui *ui) {
+	ui->parent = ui->screen;
+	go(ui, UI_SCREEN_CONTROLS);
 	ui->slot = 0;
 	ui->capturing = false;
-	ui->status[0] = '\0';
 }
 
-static void leave_settings(Ui *ui) {
-	ui->screen = UI_SCREEN_MENU;
-	ui->selected = MENU_SETTINGS;
-	ui->status[0] = '\0';
+static void open_shortcuts(Ui *ui) {
+	ui->parent = ui->screen;
+	go(ui, UI_SCREEN_SHORTCUTS);
+	ui->capturing = false;
+}
+
+static void open_rom_dialog(Ui *ui, Platform *p) {
+	ui->dialog_open = true;
+	ui->dialog_boot = false;
+	platform_open_file_dialog(p, false);
 }
 
 static void toggle_boot(Ui *ui) {
@@ -184,53 +260,45 @@ static void stop_capture(Ui *ui, Platform *p, const char *status) {
 	set_status(ui, status, false);
 }
 
+static void start_capture(Ui *ui, Platform *p, const char *name) {
+	char text[48];
+
+	ui->capturing = true;
+	platform_capture_keys(p, true);
+	snprintf(text, sizeof text, "Press a key for %s...", name);
+	set_status(ui, text, false);
+}
+
 static void capture_key(Ui *ui, Platform *p, const PlatformEvent *ev) {
-	int button = PAD_BUTTONS[ui->row].index;
-	JoyKeymap *keymap = &ui->settings->keymap;
+	bool pad = ui->screen == UI_SCREEN_CONTROLS;
+	BindKind kind = pad ? BIND_PAD : BIND_SHORTCUT;
+	int index = pad ? PAD_ORDER[ui->row] : ui->row;
+	char msg[48];
 
 	if (ev->key <= 0 || !platform_key_valid(ev->key)) {
 		return;
 	}
-	if (ev->hotkey) {
-		snprintf(ui->status, sizeof ui->status, "Used by emulator: %s", ev->hotkey);
-		ui->status_warn = true;
+	if (bindings_conflict(&ui->settings->bindings, kind, index, ui->slot, ev->key, msg,
+						  sizeof msg)) {
+		set_status(ui, msg, true);
 		return;
 	}
 
-	for (int b = 0; b < JOY_BUTTONS; b++) {
-		for (int s = 0; s < JOY_KEY_SLOTS; s++) {
-			if (keymap->key[b][s] == ev->key && !(b == button && s == ui->slot)) {
-				snprintf(ui->status, sizeof ui->status, "Already bound to %s", button_name(b));
-				ui->status_warn = true;
-				return;
-			}
-		}
-	}
-
-	keymap->key[button][ui->slot] = ev->key;
+	bindings_set(&ui->settings->bindings, kind, index, ui->slot, ev->key);
 	stop_capture(ui, p, "Key bound");
 	save(ui);
 }
 
 static void pad_confirm(Ui *ui, Platform *p) {
 	if (ui->row == PAD_BACK) {
-		open_settings(ui);
-		return;
-	}
-	if (ui->row == PAD_RESET) {
-		platform_default_keymap(&ui->settings->keymap);
+		go(ui, ui->parent);
+	} else if (ui->row == PAD_RESET) {
+		platform_default_pad(&ui->settings->bindings);
 		set_status(ui, "Defaults restored", false);
 		save(ui);
-		return;
+	} else {
+		start_capture(ui, p, bindings_pad_label(PAD_ORDER[ui->row]));
 	}
-
-	ui->capturing = true;
-	platform_capture_keys(p, true);
-
-	char text[48];
-
-	snprintf(text, sizeof text, "Press a key for %s...", PAD_BUTTONS[ui->row].name);
-	set_status(ui, text, false);
 }
 
 static void pad_clear(Ui *ui) {
@@ -238,12 +306,34 @@ static void pad_clear(Ui *ui) {
 		return;
 	}
 
-	ui->settings->keymap.key[PAD_BUTTONS[ui->row].index][ui->slot] = 0;
+	bindings_set(&ui->settings->bindings, BIND_PAD, PAD_ORDER[ui->row], ui->slot, 0);
 	set_status(ui, "Key cleared", false);
 	save(ui);
 }
 
-static void joypad_event(Ui *ui, Platform *p, const PlatformEvent *ev) {
+static void shortcut_confirm(Ui *ui, Platform *p) {
+	if (ui->row == SHORTCUT_BACK_ROW) {
+		go(ui, ui->parent);
+	} else if (ui->row == SHORTCUT_RESET_ROW) {
+		platform_default_shortcuts(&ui->settings->bindings);
+		set_status(ui, "Defaults restored", false);
+		save(ui);
+	} else {
+		start_capture(ui, p, bindings_shortcut_label((ShortcutAction)ui->row));
+	}
+}
+
+static void shortcut_clear(Ui *ui) {
+	if (ui->row >= SC_COUNT) {
+		return;
+	}
+
+	bindings_set(&ui->settings->bindings, BIND_SHORTCUT, ui->row, 0, 0);
+	set_status(ui, "Key cleared", false);
+	save(ui);
+}
+
+static void controls_event(Ui *ui, Platform *p, const PlatformEvent *ev) {
 	if (ui->capturing) {
 		if (ev->type == PLATFORM_EV_KEY_CAPTURED) {
 			capture_key(ui, p, ev);
@@ -255,12 +345,10 @@ static void joypad_event(Ui *ui, Platform *p, const PlatformEvent *ev) {
 
 	switch (ev->type) {
 	case PLATFORM_EV_UP:
-		ui->row = (ui->row + PAD_ROWS - 1) % PAD_ROWS;
-		ui->status[0] = '\0';
+		move(ui, -1);
 		break;
 	case PLATFORM_EV_DOWN:
-		ui->row = (ui->row + 1) % PAD_ROWS;
-		ui->status[0] = '\0';
+		move(ui, 1);
 		break;
 	case PLATFORM_EV_LEFT:
 	case PLATFORM_EV_RIGHT:
@@ -275,7 +363,38 @@ static void joypad_event(Ui *ui, Platform *p, const PlatformEvent *ev) {
 		pad_clear(ui);
 		break;
 	case PLATFORM_EV_BACK:
-		open_settings(ui);
+		go(ui, ui->parent);
+		break;
+	default:
+		break;
+	}
+}
+
+static void shortcuts_event(Ui *ui, Platform *p, const PlatformEvent *ev) {
+	if (ui->capturing) {
+		if (ev->type == PLATFORM_EV_KEY_CAPTURED) {
+			capture_key(ui, p, ev);
+		} else if (ev->type == PLATFORM_EV_BACK) {
+			stop_capture(ui, p, "");
+		}
+		return;
+	}
+
+	switch (ev->type) {
+	case PLATFORM_EV_UP:
+		move(ui, -1);
+		break;
+	case PLATFORM_EV_DOWN:
+		move(ui, 1);
+		break;
+	case PLATFORM_EV_CONFIRM:
+		shortcut_confirm(ui, p);
+		break;
+	case PLATFORM_EV_CLEAR:
+		shortcut_clear(ui);
+		break;
+	case PLATFORM_EV_BACK:
+		go(ui, ui->parent);
 		break;
 	default:
 		break;
@@ -285,12 +404,10 @@ static void joypad_event(Ui *ui, Platform *p, const PlatformEvent *ev) {
 static void settings_event(Ui *ui, Platform *p, const PlatformEvent *ev) {
 	switch (ev->type) {
 	case PLATFORM_EV_UP:
-		ui->row = (ui->row + SETTINGS_COUNT - 1) % SETTINGS_COUNT;
-		ui->status[0] = '\0';
+		move(ui, -1);
 		break;
 	case PLATFORM_EV_DOWN:
-		ui->row = (ui->row + 1) % SETTINGS_COUNT;
-		ui->status[0] = '\0';
+		move(ui, 1);
 		break;
 	case PLATFORM_EV_LEFT:
 	case PLATFORM_EV_RIGHT:
@@ -303,16 +420,18 @@ static void settings_event(Ui *ui, Platform *p, const PlatformEvent *ev) {
 			ui->dialog_open = true;
 			ui->dialog_boot = true;
 			platform_open_file_dialog(p, true);
-		} else if (ui->row == SET_JOYPAD) {
-			open_joypad(ui);
+		} else if (ui->row == SET_CONTROLS) {
+			open_controls(ui);
+		} else if (ui->row == SET_SHORTCUTS) {
+			open_shortcuts(ui);
 		} else if (ui->row == SET_THEME) {
 			cycle_theme(ui, 1);
 		} else {
-			leave_settings(ui);
+			go(ui, UI_SCREEN_MENU);
 		}
 		break;
 	case PLATFORM_EV_BACK:
-		leave_settings(ui);
+		go(ui, UI_SCREEN_MENU);
 		break;
 	default:
 		break;
@@ -322,22 +441,81 @@ static void settings_event(Ui *ui, Platform *p, const PlatformEvent *ev) {
 static UiAction menu_event(Ui *ui, Platform *p, const PlatformEvent *ev) {
 	switch (ev->type) {
 	case PLATFORM_EV_UP:
-		ui->selected = (ui->selected + MENU_COUNT - 1) % MENU_COUNT;
+		move(ui, -1);
 		break;
 	case PLATFORM_EV_DOWN:
-		ui->selected = (ui->selected + 1) % MENU_COUNT;
+		move(ui, 1);
 		break;
 	case PLATFORM_EV_CONFIRM:
-		if (ui->selected == MENU_QUIT) {
+		if (ui->row == MENU_QUIT) {
 			return UI_ACTION_QUIT;
 		}
-		if (ui->selected == MENU_SETTINGS) {
+		if (ui->row == MENU_SETTINGS) {
 			open_settings(ui);
-			break;
+		} else {
+			open_rom_dialog(ui, p);
 		}
-		ui->dialog_open = true;
-		ui->dialog_boot = false;
-		platform_open_file_dialog(p, false);
+		break;
+	default:
+		break;
+	}
+	return UI_ACTION_NONE;
+}
+
+static UiAction pause_event(Ui *ui, Platform *p, const PlatformEvent *ev) {
+	switch (ev->type) {
+	case PLATFORM_EV_UP:
+		move(ui, -1);
+		break;
+	case PLATFORM_EV_DOWN:
+		move(ui, 1);
+		break;
+	case PLATFORM_EV_BACK:
+		return UI_ACTION_RESUME;
+	case PLATFORM_EV_CONFIRM:
+		switch (ui->row) {
+		case PAUSE_CONTINUE:
+			return UI_ACTION_RESUME;
+		case PAUSE_RESET:
+			return UI_ACTION_RESET;
+		case PAUSE_CONTROLS:
+			open_controls(ui);
+			break;
+		case PAUSE_SHORTCUTS:
+			open_shortcuts(ui);
+			break;
+		case PAUSE_LOAD:
+			open_rom_dialog(ui, p);
+			break;
+		default:
+			return UI_ACTION_MAIN_MENU;
+		}
+		break;
+	default:
+		break;
+	}
+	return UI_ACTION_NONE;
+}
+
+static UiAction dispatch(Ui *ui, Platform *p, const PlatformEvent *ev) {
+	switch (ui->screen) {
+	case UI_SCREEN_MENU:
+		return menu_event(ui, p, ev);
+	case UI_SCREEN_PAUSE:
+		return pause_event(ui, p, ev);
+	case UI_SCREEN_DROP:
+		if (ev->type == PLATFORM_EV_BACK) {
+			go(ui, ui->parent);
+		}
+		break;
+	case UI_SCREEN_SETTINGS:
+		settings_event(ui, p, ev);
+		break;
+	case UI_SCREEN_CONTROLS:
+		controls_event(ui, p, ev);
+		break;
+	case UI_SCREEN_SHORTCUTS:
+		shortcuts_event(ui, p, ev);
 		break;
 	default:
 		break;
@@ -352,7 +530,8 @@ static UiAction file_chosen(Ui *ui, const PlatformEvent *ev) {
 		import_boot(ui, ev->path);
 		return UI_ACTION_NONE;
 	}
-	if (ui->screen != UI_SCREEN_MENU && ui->screen != UI_SCREEN_DROP) {
+	if (ui->screen != UI_SCREEN_MENU && ui->screen != UI_SCREEN_DROP &&
+		ui->screen != UI_SCREEN_PAUSE) {
 		return UI_ACTION_NONE;
 	}
 
@@ -368,8 +547,57 @@ static void dialog_failed(Ui *ui) {
 	ui->dialog_boot = false;
 	if (boot) {
 		set_status(ui, "File dialog unavailable", true);
-	} else {
-		ui->screen = UI_SCREEN_DROP;
+		return;
+	}
+
+	ui->parent = ui->screen;
+	go(ui, UI_SCREEN_DROP);
+}
+
+static bool pick_row(Ui *ui, int mx, int my, bool *on_cell) {
+	ListGeom g = geom(ui->screen);
+	int rel = my - g.y0;
+
+	if (g.count == 0 || mx < MARGIN_X || mx >= MARGIN_X + CONTENT_W || rel < 0) {
+		return false;
+	}
+
+	int idx = rel / g.pitch;
+
+	if (idx >= g.count || rel % g.pitch >= g.h) {
+		return false;
+	}
+
+	ui->row = idx;
+	*on_cell = true;
+
+	if (ui->screen == UI_SCREEN_CONTROLS && idx < JOY_BUTTONS) {
+		*on_cell = false;
+		for (int s = 0; s < BIND_KEY_SLOTS; s++) {
+			int x = PAD_COL_X + s * (PAD_CELL_W + PAD_CELL_GAP);
+
+			if (mx >= x && mx < x + PAD_CELL_W) {
+				ui->slot = s;
+				*on_cell = true;
+			}
+		}
+	}
+	return true;
+}
+
+static bool is_user_input(PlatformEventType type) {
+	switch (type) {
+	case PLATFORM_EV_UP:
+	case PLATFORM_EV_DOWN:
+	case PLATFORM_EV_LEFT:
+	case PLATFORM_EV_RIGHT:
+	case PLATFORM_EV_CONFIRM:
+	case PLATFORM_EV_BACK:
+	case PLATFORM_EV_CLEAR:
+	case PLATFORM_EV_MOUSE_CLICK:
+		return true;
+	default:
+		return false;
 	}
 }
 
@@ -393,26 +621,31 @@ UiAction ui_handle_event(Ui *ui, Platform *p, const PlatformEvent *ev) {
 		break;
 	}
 
-	if (ui->dialog_open) {
+	if (ui->dialog_open || ev->repeat) {
 		return UI_ACTION_NONE;
 	}
-
-	switch (ui->screen) {
-	case UI_SCREEN_MENU:
-		return menu_event(ui, p, ev);
-	case UI_SCREEN_DROP:
-		if (ev->type == PLATFORM_EV_BACK) {
-			ui->screen = UI_SCREEN_MENU;
-		}
-		break;
-	case UI_SCREEN_SETTINGS:
-		settings_event(ui, p, ev);
-		break;
-	case UI_SCREEN_JOYPAD:
-		joypad_event(ui, p, ev);
-		break;
+	if (!ui->capturing && is_user_input(ev->type)) {
+		ui->status[0] = '\0';
 	}
-	return UI_ACTION_NONE;
+
+	bool on_cell = false;
+
+	switch (ev->type) {
+	case PLATFORM_EV_MOUSE_MOVE:
+		if (!ui->capturing) {
+			pick_row(ui, ev->mx, ev->my, &on_cell);
+		}
+		return UI_ACTION_NONE;
+	case PLATFORM_EV_MOUSE_CLICK:
+		if (!ui->capturing && pick_row(ui, ev->mx, ev->my, &on_cell) && on_cell) {
+			PlatformEvent confirm = {.type = PLATFORM_EV_CONFIRM};
+
+			return dispatch(ui, p, &confirm);
+		}
+		return UI_ACTION_NONE;
+	default:
+		return dispatch(ui, p, ev);
+	}
 }
 
 static int text_w(const char *text, int scale) {
@@ -503,18 +736,31 @@ static void draw_row(Platform *p, const Theme *t, int y, int h, bool selected, c
 
 static void draw_menu(const Ui *ui, Platform *p, const Theme *t) {
 	int cx = UI_VIEW_W / 2;
+	ListGeom g = geom(UI_SCREEN_MENU);
 
 	draw_mark(p, cx - 25, 56, 24);
 	text_center(p, cx, 124, SCALE_HERO, t->text, "GBOYC");
 	text_center(p, cx, 180, SCALE_BODY, t->dim, "Game Boy emulator");
 
 	for (int i = 0; i < MENU_COUNT; i++) {
-		draw_row(p, t, HERO_LIST_Y + i * ROW_PITCH, ROW_H, i == ui->selected, MENU_LABELS[i], NULL,
-				 false);
+		draw_row(p, t, g.y0 + i * g.pitch, g.h, i == ui->row, MENU_LABELS[i], NULL, false);
 	}
 
 	draw_status(ui, p, t);
 	draw_hints(p, t, HINTS_MENU, COUNT(HINTS_MENU));
+}
+
+static void draw_pause(const Ui *ui, Platform *p, const Theme *t) {
+	ListGeom g = geom(UI_SCREEN_PAUSE);
+
+	draw_header(p, t, "Paused");
+	for (int i = 0; i < PAUSE_COUNT; i++) {
+		draw_row(p, t, g.y0 + i * g.pitch, g.h, i == ui->row, PAUSE_LABELS[i], PAUSE_VALUES[i],
+				 false);
+	}
+
+	draw_status(ui, p, t);
+	draw_hints(p, t, HINTS_PAUSE, COUNT(HINTS_PAUSE));
 }
 
 static void draw_dashed_rect(Platform *p, int x, int y, int w, int h, uint32_t color) {
@@ -543,6 +789,7 @@ static void draw_drop(Platform *p, const Theme *t) {
 
 static void draw_settings(const Ui *ui, Platform *p, const Theme *t) {
 	char file[24];
+	ListGeom g = geom(UI_SCREEN_SETTINGS);
 
 	draw_header(p, t, "Settings");
 
@@ -562,8 +809,12 @@ static void draw_settings(const Ui *ui, Platform *p, const Theme *t) {
 			fit(file, sizeof file, ui->boot_ok ? ui->settings->boot_file : "none", 14);
 			value = file;
 			break;
-		case SET_JOYPAD:
-			label = "Joypad";
+		case SET_CONTROLS:
+			label = "Game controls";
+			value = ">";
+			break;
+		case SET_SHORTCUTS:
+			label = "Emulator shortcuts";
 			value = ">";
 			break;
 		case SET_THEME:
@@ -574,7 +825,7 @@ static void draw_settings(const Ui *ui, Platform *p, const Theme *t) {
 		default:
 			break;
 		}
-		draw_row(p, t, LIST_Y + i * ROW_PITCH, ROW_H, i == ui->row, label, value, adjustable);
+		draw_row(p, t, g.y0 + i * g.pitch, g.h, i == ui->row, label, value, adjustable);
 	}
 
 	draw_status(ui, p, t);
@@ -597,26 +848,27 @@ static void draw_key_cell(Platform *p, const Theme *t, int x, int y, bool select
 }
 
 static void draw_pad_row(const Ui *ui, Platform *p, const Theme *t, int row) {
-	int y = LIST_Y + row * PAD_ROW_PITCH;
+	ListGeom g = geom(UI_SCREEN_CONTROLS);
+	int y = g.y0 + row * g.pitch;
 	bool selected = row == ui->row;
 
 	if (row >= JOY_BUTTONS) {
-		draw_row(p, t, y, PAD_ROW_H, selected, row == PAD_RESET ? "Reset to default" : "Back", NULL,
+		draw_row(p, t, y, g.h, selected, row == PAD_RESET ? "Reset to default" : "Back", NULL,
 				 false);
 		return;
 	}
 
-	fill_card(p, MARGIN_X, y, CONTENT_W, PAD_ROW_H, selected ? t->accent : t->surface);
-	text_left(p, MARGIN_X + ROW_PAD, y + (PAD_ROW_H - GLYPH * SCALE_BODY) / 2, SCALE_BODY,
-			  selected ? t->on_accent : t->text, PAD_BUTTONS[row].name);
+	int button = PAD_ORDER[row];
 
-	int button = PAD_BUTTONS[row].index;
+	fill_card(p, MARGIN_X, y, CONTENT_W, g.h, selected ? t->accent : t->surface);
+	text_left(p, MARGIN_X + ROW_PAD, y + (g.h - GLYPH * SCALE_BODY) / 2, SCALE_BODY,
+			  selected ? t->on_accent : t->text, bindings_pad_label(button));
 
-	for (int s = 0; s < JOY_KEY_SLOTS; s++) {
+	for (int s = 0; s < BIND_KEY_SLOTS; s++) {
 		char name[16];
 		bool active = selected && s == ui->slot;
 
-		key_label(ui->settings->keymap.key[button][s], name, sizeof name);
+		key_label(bindings_get(&ui->settings->bindings, BIND_PAD, button, s), name, sizeof name);
 		if (ui->capturing && active) {
 			snprintf(name, sizeof name, "...");
 		}
@@ -624,10 +876,11 @@ static void draw_pad_row(const Ui *ui, Platform *p, const Theme *t, int row) {
 	}
 }
 
-static void draw_joypad(const Ui *ui, Platform *p, const Theme *t) {
-	draw_header(p, t, "Joypad");
+static void draw_controls(const Ui *ui, Platform *p, const Theme *t) {
+	draw_header(p, t, "Controls");
+	text_left(p, MARGIN_X, 92, SCALE_CAPTION, t->dim, "Game Boy buttons");
 
-	for (int s = 0; s < JOY_KEY_SLOTS; s++) {
+	for (int s = 0; s < BIND_KEY_SLOTS; s++) {
 		char title[8];
 
 		snprintf(title, sizeof title, "KEY %d", s + 1);
@@ -642,19 +895,66 @@ static void draw_joypad(const Ui *ui, Platform *p, const Theme *t) {
 	if (ui->capturing) {
 		draw_hints(p, t, HINTS_CAPTURE, COUNT(HINTS_CAPTURE));
 	} else {
-		draw_hints(p, t, HINTS_JOYPAD, COUNT(HINTS_JOYPAD));
+		draw_hints(p, t, HINTS_CONTROLS, COUNT(HINTS_CONTROLS));
+	}
+}
+
+static void draw_shortcut_row(const Ui *ui, Platform *p, const Theme *t, int row) {
+	ListGeom g = geom(UI_SCREEN_SHORTCUTS);
+	int y = g.y0 + row * g.pitch;
+	bool selected = row == ui->row;
+
+	if (row >= SC_COUNT) {
+		draw_row(p, t, y, g.h, selected, row == SHORTCUT_RESET_ROW ? "Reset to default" : "Back",
+				 NULL, false);
+		return;
+	}
+
+	fill_card(p, MARGIN_X, y, CONTENT_W, g.h, selected ? t->accent : t->surface);
+	text_left(p, MARGIN_X + ROW_PAD, y + (g.h - GLYPH * SCALE_BODY) / 2, SCALE_BODY,
+			  selected ? t->on_accent : t->text, bindings_shortcut_label((ShortcutAction)row));
+
+	char name[16];
+
+	key_label(bindings_get(&ui->settings->bindings, BIND_SHORTCUT, row, 0), name, sizeof name);
+	if (ui->capturing && selected) {
+		snprintf(name, sizeof name, "...");
+	}
+	draw_key_cell(p, t, SHORTCUT_CELL_X, y, selected, selected, name);
+}
+
+static void draw_shortcuts(const Ui *ui, Platform *p, const Theme *t) {
+	draw_header(p, t, "Shortcuts");
+	text_left(p, MARGIN_X, 92, SCALE_CAPTION, t->dim, "Emulator actions. State slots: keys 1-9");
+
+	for (int row = 0; row < SHORTCUT_ROWS; row++) {
+		draw_shortcut_row(ui, p, t, row);
+	}
+
+	draw_status(ui, p, t);
+	if (ui->capturing) {
+		draw_hints(p, t, HINTS_CAPTURE, COUNT(HINTS_CAPTURE));
+	} else {
+		draw_hints(p, t, HINTS_SHORTCUTS, COUNT(HINTS_SHORTCUTS));
 	}
 }
 
 void ui_draw(const Ui *ui, Platform *p) {
 	const Theme *t = theme_get(ui->settings->theme, ui->system_dark);
 
-	platform_set_background(p, t->bg);
-	platform_clear(p, t->bg);
+	if (ui->in_game) {
+		platform_fill_rect(p, 0, 0, UI_VIEW_W, UI_VIEW_H, (t->bg & 0x00FFFFFFu) | OVERLAY_ALPHA);
+	} else {
+		platform_set_background(p, t->bg);
+		platform_clear(p, t->bg);
+	}
 
 	switch (ui->screen) {
 	case UI_SCREEN_MENU:
 		draw_menu(ui, p, t);
+		break;
+	case UI_SCREEN_PAUSE:
+		draw_pause(ui, p, t);
 		break;
 	case UI_SCREEN_DROP:
 		draw_drop(p, t);
@@ -662,10 +962,92 @@ void ui_draw(const Ui *ui, Platform *p) {
 	case UI_SCREEN_SETTINGS:
 		draw_settings(ui, p, t);
 		break;
-	case UI_SCREEN_JOYPAD:
-		draw_joypad(ui, p, t);
+	case UI_SCREEN_CONTROLS:
+		draw_controls(ui, p, t);
+		break;
+	case UI_SCREEN_SHORTCUTS:
+		draw_shortcuts(ui, p, t);
+		break;
+	default:
 		break;
 	}
+}
 
-	platform_flip(p);
+static uint32_t chip_bg(const Theme *t) {
+	return (t->surface & 0x00FFFFFFu) | HUD_ALPHA;
+}
+
+static int chip_text_y(int y) {
+	return y + (HUD_CHIP_H - GLYPH * SCALE_BODY) / 2;
+}
+
+static void draw_toast(Platform *p, const Theme *t, const char *text) {
+	int w = text_w(text, SCALE_BODY) + 2 * HUD_PAD + 20;
+
+	fill_card(p, HUD_MARGIN, HUD_MARGIN, w, HUD_CHIP_H, chip_bg(t));
+	platform_fill_rect(p, HUD_MARGIN + HUD_PAD, HUD_MARGIN + (HUD_CHIP_H - 8) / 2, 8, 8, t->accent);
+	text_left(p, HUD_MARGIN + HUD_PAD + 20, chip_text_y(HUD_MARGIN), SCALE_BODY, t->text, text);
+}
+
+static void draw_speed(Platform *p, const Theme *t, int speed) {
+	char tag[16];
+
+	snprintf(tag, sizeof tag, "%dx", speed);
+
+	int w = text_w(tag, SCALE_BODY) + 2 * HUD_PAD;
+	int x = UI_VIEW_W - HUD_MARGIN - w;
+
+	fill_card(p, x, HUD_MARGIN, w, HUD_CHIP_H, t->accent);
+	text_left(p, x + HUD_PAD, chip_text_y(HUD_MARGIN), SCALE_BODY, t->on_accent, tag);
+}
+
+static void draw_paused(Platform *p, const Theme *t) {
+	const char *text = "Paused";
+	int w = 2 * HUD_PAD + 22 + text_w(text, SCALE_BODY);
+	int y = UI_VIEW_H - HUD_MARGIN - HUD_CHIP_H;
+
+	fill_card(p, HUD_MARGIN, y, w, HUD_CHIP_H, chip_bg(t));
+	platform_fill_rect(p, HUD_MARGIN + HUD_PAD, y + 10, 4, 12, t->accent);
+	platform_fill_rect(p, HUD_MARGIN + HUD_PAD + 8, y + 10, 4, 12, t->accent);
+	text_left(p, HUD_MARGIN + HUD_PAD + 22, chip_text_y(y), SCALE_BODY, t->text, text);
+}
+
+static void draw_pc(Platform *p, const Theme *t, const Hud *hud) {
+	char hex[8];
+	char step[16] = "";
+
+	snprintf(hex, sizeof hex, "%04X", hud->pc & 0xFFFFu);
+	if (hud->mid_instruction) {
+		snprintf(step, sizeof step, "c%u", hud->cycles);
+	}
+
+	int label_w = text_w("PC ", SCALE_BODY);
+	int hex_w = text_w(hex, SCALE_BODY);
+	int step_w = step[0] ? 16 + text_w(step, SCALE_BODY) : 0;
+	int w = 2 * HUD_PAD + label_w + hex_w + step_w;
+	int x = UI_VIEW_W - HUD_MARGIN - w;
+	int y = UI_VIEW_H - HUD_MARGIN - HUD_CHIP_H;
+	int ty = chip_text_y(y);
+
+	fill_card(p, x, y, w, HUD_CHIP_H, chip_bg(t));
+	text_left(p, x + HUD_PAD, ty, SCALE_BODY, t->dim, "PC ");
+	text_left(p, x + HUD_PAD + label_w, ty, SCALE_BODY, t->text, hex);
+	if (step[0]) {
+		text_left(p, x + HUD_PAD + label_w + hex_w + 16, ty, SCALE_BODY, t->accent, step);
+	}
+}
+
+void ui_draw_hud(const Ui *ui, Platform *p, const Hud *hud) {
+	const Theme *t = theme_get(ui->settings->theme, ui->system_dark);
+
+	if (hud->toast && hud->toast[0]) {
+		draw_toast(p, t, hud->toast);
+	}
+	if (hud->speed > 1) {
+		draw_speed(p, t, hud->speed);
+	}
+	if (hud->paused) {
+		draw_paused(p, t);
+		draw_pc(p, t, hud);
+	}
 }

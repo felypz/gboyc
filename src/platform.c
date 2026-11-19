@@ -19,11 +19,10 @@ struct Platform {
 	SDL_Window *window;
 	SDL_Renderer *renderer;
 	SDL_Texture *texture;
+	SDL_Texture *screen;
 	SDL_AudioStream *audio;
 	uint64_t next_frame_ns;
 	Uint32 dialog_event;
-	int view_w;
-	int view_h;
 	bool capture;
 	uint32_t background;
 };
@@ -31,6 +30,55 @@ struct Platform {
 static void set_color(Platform *p, uint32_t argb) {
 	SDL_SetRenderDrawColor(p->renderer, (argb >> 16) & 0xFF, (argb >> 8) & 0xFF, argb & 0xFF,
 						   (argb >> 24) & 0xFF);
+}
+
+static void use_screen(Platform *p) {
+	if (SDL_GetRenderTarget(p->renderer) != p->screen) {
+		SDL_SetRenderTarget(p->renderer, p->screen);
+	}
+}
+
+static SDL_FRect present_rect(Platform *p) {
+	int w = 0;
+	int h = 0;
+
+	SDL_GetRenderOutputSize(p->renderer, &w, &h);
+
+	int scale = w / GB_SCREEN_W;
+	if (h / GB_SCREEN_H < scale) {
+		scale = h / GB_SCREEN_H;
+	}
+
+	float rw;
+	float rh;
+
+	if (scale >= 1) {
+		rw = (float)(GB_SCREEN_W * scale);
+		rh = (float)(GB_SCREEN_H * scale);
+	} else {
+		float sx = (float)w / GB_SCREEN_W;
+		float sy = (float)h / GB_SCREEN_H;
+		float s = sx < sy ? sx : sy;
+
+		rw = GB_SCREEN_W * s;
+		rh = GB_SCREEN_H * s;
+	}
+
+	SDL_FRect rect = {(float)(int)(((float)w - rw) / 2), (float)(int)(((float)h - rh) / 2), rw, rh};
+
+	return rect;
+}
+
+static void window_to_ui(Platform *p, float wx, float wy, int *x, int *y) {
+	float rx = 0;
+	float ry = 0;
+
+	SDL_RenderCoordinatesFromWindow(p->renderer, wx, wy, &rx, &ry);
+
+	SDL_FRect rect = present_rect(p);
+
+	*x = (int)((rx - rect.x) * UI_VIEW_W / rect.w);
+	*y = (int)((ry - rect.y) * UI_VIEW_H / rect.h);
 }
 
 static void audio_open(Platform *p) {
@@ -50,11 +98,10 @@ static void audio_open(Platform *p) {
 
 Platform *platform_create(const char *title, int scale) {
 	Platform *p = calloc(1, sizeof *p);
-	p->background = 0xFF000000;
-
 	if (!p) {
 		return NULL;
 	}
+	p->background = 0xFF000000;
 
 	if (!SDL_Init(SDL_INIT_VIDEO)) {
 		fprintf(stderr, "SDL_Init: %s\n", SDL_GetError());
@@ -79,6 +126,7 @@ Platform *platform_create(const char *title, int scale) {
 		fprintf(stderr, "SDL_CreateRenderer: %s\n", SDL_GetError());
 		goto fail;
 	}
+	SDL_SetRenderDrawBlendMode(p->renderer, SDL_BLENDMODE_BLEND);
 
 	p->texture = SDL_CreateTexture(p->renderer, SDL_PIXELFORMAT_ARGB8888,
 								   SDL_TEXTUREACCESS_STREAMING, GB_SCREEN_W, GB_SCREEN_H);
@@ -88,8 +136,15 @@ Platform *platform_create(const char *title, int scale) {
 	}
 	SDL_SetTextureScaleMode(p->texture, SDL_SCALEMODE_NEAREST);
 
+	p->screen = SDL_CreateTexture(p->renderer, SDL_PIXELFORMAT_ARGB8888, SDL_TEXTUREACCESS_TARGET,
+								  UI_VIEW_W, UI_VIEW_H);
+	if (!p->screen) {
+		fprintf(stderr, "SDL_CreateTexture: %s\n", SDL_GetError());
+		goto fail;
+	}
+	SDL_SetTextureScaleMode(p->screen, SDL_SCALEMODE_NEAREST);
+
 	audio_open(p);
-	platform_set_view(p, UI_VIEW_W, UI_VIEW_H);
 
 	p->next_frame_ns = SDL_GetTicksNS();
 	return p;
@@ -106,6 +161,9 @@ void platform_destroy(Platform *p) {
 	if (p->audio) {
 		SDL_DestroyAudioStream(p->audio);
 	}
+	if (p->screen) {
+		SDL_DestroyTexture(p->screen);
+	}
 	if (p->texture) {
 		SDL_DestroyTexture(p->texture);
 	}
@@ -119,97 +177,31 @@ void platform_destroy(Platform *p) {
 	free(p);
 }
 
-void platform_set_view(Platform *p, int w, int h) {
-	SDL_SetRenderLogicalPresentation(p->renderer, w, h, SDL_LOGICAL_PRESENTATION_INTEGER_SCALE);
-	p->view_w = w;
-	p->view_h = h;
+void platform_set_background(Platform *p, uint32_t argb) {
+	p->background = argb;
 }
 
-static const char *hotkey_name(SDL_Keycode key) {
-	if (key >= SDLK_1 && key <= SDLK_9) {
-		return "State slot";
-	}
-
-	switch (key) {
-	case SDLK_P:
-		return "Pause";
-	case SDLK_TAB:
-		return "Speed";
-	case SDLK_F5:
-		return "Save state";
-	case SDLK_F9:
-		return "Load state";
-	case SDLK_N:
-		return "Step frame";
-	case SDLK_I:
-		return "Step instr";
-	case SDLK_C:
-		return "Step cycle";
-	default:
-		return NULL;
-	}
-}
-
-static bool map_key(SDL_Keycode key, PlatformEvent *out) {
-	if (key >= SDLK_1 && key <= SDLK_9) {
-		out->type = PLATFORM_EV_SLOT;
-		out->slot = (int)(key - SDLK_1) + 1;
-		return true;
-	}
-
+static PlatformEventType map_nav(SDL_Keycode key) {
 	switch (key) {
 	case SDLK_UP:
-		out->type = PLATFORM_EV_UP;
-		return true;
+		return PLATFORM_EV_UP;
 	case SDLK_DOWN:
-		out->type = PLATFORM_EV_DOWN;
-		return true;
+		return PLATFORM_EV_DOWN;
 	case SDLK_LEFT:
-		out->type = PLATFORM_EV_LEFT;
-		return true;
+		return PLATFORM_EV_LEFT;
 	case SDLK_RIGHT:
-		out->type = PLATFORM_EV_RIGHT;
-		return true;
+		return PLATFORM_EV_RIGHT;
 	case SDLK_RETURN:
 	case SDLK_KP_ENTER:
 	case SDLK_SPACE:
-		out->type = PLATFORM_EV_CONFIRM;
-		return true;
+		return PLATFORM_EV_CONFIRM;
 	case SDLK_ESCAPE:
-		out->type = PLATFORM_EV_BACK;
-		return true;
+		return PLATFORM_EV_BACK;
 	case SDLK_DELETE:
-		out->type = PLATFORM_EV_CLEAR;
-		return true;
-	case SDLK_P:
-		out->type = PLATFORM_EV_PAUSE;
-		return true;
-	case SDLK_TAB:
-		out->type = PLATFORM_EV_SPEED;
-		return true;
-	case SDLK_F5:
-		out->type = PLATFORM_EV_SAVE_STATE;
-		return true;
-	case SDLK_F9:
-		out->type = PLATFORM_EV_LOAD_STATE;
-		return true;
-	case SDLK_N:
-		out->type = PLATFORM_EV_STEP_FRAME;
-		return true;
-	case SDLK_I:
-		out->type = PLATFORM_EV_STEP_INSTR;
-		return true;
-	case SDLK_C:
-		out->type = PLATFORM_EV_STEP_CYCLE;
-		return true;
+		return PLATFORM_EV_CLEAR;
 	default:
-		return false;
+		return PLATFORM_EV_KEY;
 	}
-}
-
-static bool repeats(PlatformEventType type) {
-	return type == PLATFORM_EV_STEP_FRAME || type == PLATFORM_EV_STEP_INSTR ||
-		   type == PLATFORM_EV_STEP_CYCLE;
 }
 
 bool platform_next_event(Platform *p, PlatformEvent *out) {
@@ -217,9 +209,10 @@ bool platform_next_event(Platform *p, PlatformEvent *out) {
 
 	while (SDL_PollEvent(&ev)) {
 		out->path[0] = '\0';
-		out->slot = 0;
 		out->key = 0;
-		out->hotkey = NULL;
+		out->repeat = false;
+		out->mx = 0;
+		out->my = 0;
 
 		if (ev.type == p->dialog_event) {
 			char *path = ev.user.data1;
@@ -243,20 +236,31 @@ bool platform_next_event(Platform *p, PlatformEvent *out) {
 			out->type = PLATFORM_EV_THEME_CHANGED;
 			return true;
 		case SDL_EVENT_KEY_DOWN:
+			out->key = (int)ev.key.scancode;
+			out->repeat = ev.key.repeat;
 			if (p->capture) {
 				if (ev.key.repeat) {
 					break;
 				}
-				if (ev.key.key == SDLK_ESCAPE) {
-					out->type = PLATFORM_EV_BACK;
-					return true;
-				}
-				out->type = PLATFORM_EV_KEY_CAPTURED;
-				out->key = (int)ev.key.scancode;
-				out->hotkey = hotkey_name(ev.key.key);
+				out->type = ev.key.key == SDLK_ESCAPE ? PLATFORM_EV_BACK : PLATFORM_EV_KEY_CAPTURED;
 				return true;
 			}
-			if (map_key(ev.key.key, out) && (!ev.key.repeat || repeats(out->type))) {
+			out->type = map_nav(ev.key.key);
+			return true;
+		case SDL_EVENT_MOUSE_MOTION:
+			out->type = PLATFORM_EV_MOUSE_MOVE;
+			window_to_ui(p, ev.motion.x, ev.motion.y, &out->mx, &out->my);
+			return true;
+		case SDL_EVENT_MOUSE_BUTTON_DOWN:
+			if (ev.button.button == SDL_BUTTON_LEFT) {
+				out->type = PLATFORM_EV_MOUSE_CLICK;
+				window_to_ui(p, ev.button.x, ev.button.y, &out->mx, &out->my);
+				return true;
+			}
+			break;
+		case SDL_EVENT_MOUSE_WHEEL:
+			if (ev.wheel.y != 0) {
+				out->type = ev.wheel.y > 0 ? PLATFORM_EV_UP : PLATFORM_EV_DOWN;
 				return true;
 			}
 			break;
@@ -272,17 +276,29 @@ bool platform_next_event(Platform *p, PlatformEvent *out) {
 	return false;
 }
 
-void platform_default_keymap(JoyKeymap *keymap) {
-	memset(keymap, 0, sizeof *keymap);
-	keymap->key[0][0] = SDL_SCANCODE_RIGHT;
-	keymap->key[1][0] = SDL_SCANCODE_LEFT;
-	keymap->key[2][0] = SDL_SCANCODE_UP;
-	keymap->key[3][0] = SDL_SCANCODE_DOWN;
-	keymap->key[4][0] = SDL_SCANCODE_Z;
-	keymap->key[5][0] = SDL_SCANCODE_X;
-	keymap->key[6][0] = SDL_SCANCODE_BACKSPACE;
-	keymap->key[6][1] = SDL_SCANCODE_RSHIFT;
-	keymap->key[7][0] = SDL_SCANCODE_RETURN;
+void platform_default_pad(Bindings *b) {
+	memset(b->pad, 0, sizeof b->pad);
+	b->pad[0][0] = SDL_SCANCODE_RIGHT;
+	b->pad[1][0] = SDL_SCANCODE_LEFT;
+	b->pad[2][0] = SDL_SCANCODE_UP;
+	b->pad[3][0] = SDL_SCANCODE_DOWN;
+	b->pad[4][0] = SDL_SCANCODE_Z;
+	b->pad[5][0] = SDL_SCANCODE_X;
+	b->pad[6][0] = SDL_SCANCODE_BACKSPACE;
+	b->pad[6][1] = SDL_SCANCODE_RSHIFT;
+	b->pad[7][0] = SDL_SCANCODE_RETURN;
+}
+
+void platform_default_shortcuts(Bindings *b) {
+	memset(b->shortcut, 0, sizeof b->shortcut);
+	b->shortcut[SC_PAUSE] = SDL_SCANCODE_P;
+	b->shortcut[SC_SPEED] = SDL_SCANCODE_TAB;
+	b->shortcut[SC_RESET] = SDL_SCANCODE_R;
+	b->shortcut[SC_SAVE_STATE] = SDL_SCANCODE_F5;
+	b->shortcut[SC_LOAD_STATE] = SDL_SCANCODE_F9;
+	b->shortcut[SC_STEP_FRAME] = SDL_SCANCODE_N;
+	b->shortcut[SC_STEP_INSTR] = SDL_SCANCODE_I;
+	b->shortcut[SC_STEP_CYCLE] = SDL_SCANCODE_C;
 }
 
 const char *platform_key_name(int scancode) {
@@ -293,18 +309,42 @@ bool platform_key_valid(int scancode) {
 	return scancode >= 0 && scancode < SDL_SCANCODE_COUNT;
 }
 
+int platform_slot_for_key(int scancode) {
+	if (scancode >= SDL_SCANCODE_1 && scancode <= SDL_SCANCODE_9) {
+		return scancode - SDL_SCANCODE_1 + 1;
+	}
+	return 0;
+}
+
+bool platform_key_reserved(int scancode) {
+	return platform_slot_for_key(scancode) != 0;
+}
+
 void platform_capture_keys(Platform *p, bool on) {
 	p->capture = on;
 }
 
-uint8_t platform_joypad(const Platform *p, const JoyKeymap *keymap) {
+bool platform_system_dark(void) {
+	return SDL_GetSystemTheme() != SDL_SYSTEM_THEME_LIGHT;
+}
+
+void platform_show_cursor(Platform *p, bool show) {
+	(void)p;
+	if (show) {
+		SDL_ShowCursor();
+	} else {
+		SDL_HideCursor();
+	}
+}
+
+uint8_t platform_joypad(const Platform *p, const Bindings *bindings) {
 	(void)p;
 	const bool *keys = SDL_GetKeyboardState(NULL);
 	uint8_t mask = 0;
 
 	for (int b = 0; b < JOY_BUTTONS; b++) {
-		for (int s = 0; s < JOY_KEY_SLOTS; s++) {
-			int scancode = keymap->key[b][s];
+		for (int s = 0; s < BIND_KEY_SLOTS; s++) {
+			int scancode = bindings->pad[b][s];
 
 			if (scancode > 0 && platform_key_valid(scancode) && keys[scancode]) {
 				mask |= (uint8_t)(1u << b);
@@ -353,15 +393,8 @@ bool platform_make_dir(const char *path) {
 	return SDL_CreateDirectory(path);
 }
 
-bool platform_system_dark(void) {
-	return SDL_GetSystemTheme() != SDL_SYSTEM_THEME_LIGHT;
-}
-
-void platform_set_background(Platform *p, uint32_t argb) {
-	p->background = argb;
-}
-
 void platform_clear(Platform *p, uint32_t argb) {
+	use_screen(p);
 	set_color(p, argb);
 	SDL_RenderClear(p->renderer);
 }
@@ -369,11 +402,13 @@ void platform_clear(Platform *p, uint32_t argb) {
 void platform_fill_rect(Platform *p, int x, int y, int w, int h, uint32_t argb) {
 	SDL_FRect rect = {(float)x, (float)y, (float)w, (float)h};
 
+	use_screen(p);
 	set_color(p, argb);
 	SDL_RenderFillRect(p->renderer, &rect);
 }
 
 void platform_draw_text(Platform *p, int x, int y, int scale, uint32_t argb, const char *text) {
+	use_screen(p);
 	set_color(p, argb);
 	SDL_SetRenderScale(p->renderer, (float)scale, (float)scale);
 	SDL_RenderDebugText(p->renderer, (float)x / scale, (float)y / scale, text);
@@ -382,18 +417,27 @@ void platform_draw_text(Platform *p, int x, int y, int scale, uint32_t argb, con
 
 void platform_draw_text_centered(Platform *p, int y, int scale, uint32_t argb, const char *text) {
 	int w = (int)strlen(text) * SDL_DEBUG_TEXT_FONT_CHARACTER_SIZE * scale;
-	platform_draw_text(p, (p->view_w - w) / 2, y, scale, argb, text);
-}
 
-void platform_flip(Platform *p) {
-	set_color(p, p->background);
-	SDL_RenderPresent(p->renderer);
+	platform_draw_text(p, (UI_VIEW_W - w) / 2, y, scale, argb, text);
 }
 
 void platform_draw_frame(Platform *p, const uint32_t *framebuffer) {
+	use_screen(p);
 	SDL_UpdateTexture(p->texture, NULL, framebuffer, GB_SCREEN_W * (int)sizeof(uint32_t));
+	SDL_SetRenderDrawColor(p->renderer, 0, 0, 0, 255);
 	SDL_RenderClear(p->renderer);
 	SDL_RenderTexture(p->renderer, p->texture, NULL, NULL);
+}
+
+void platform_flip(Platform *p) {
+	SDL_SetRenderTarget(p->renderer, NULL);
+
+	SDL_FRect dst = present_rect(p);
+
+	set_color(p, p->background);
+	SDL_RenderClear(p->renderer);
+	SDL_RenderTexture(p->renderer, p->screen, NULL, &dst);
+	SDL_RenderPresent(p->renderer);
 }
 
 void platform_audio_push(Platform *p, const float *samples, size_t frames) {

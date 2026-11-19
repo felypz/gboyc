@@ -13,12 +13,7 @@
 #define JOY_SELECT 0x40
 #define JOY_START  0x80
 
-#define JOY_BUTTONS	  8
-#define JOY_KEY_SLOTS 2
-
-typedef struct {
-	int key[JOY_BUTTONS][JOY_KEY_SLOTS];
-} JoyKeymap;
+#define JOY_BUTTONS 8
 
 typedef struct {
 	uint8_t select;
