@@ -30,6 +30,11 @@ typedef enum {
 	ACC_WRITE,
 } Access;
 
+static void exec(Cpu *cpu);
+static void exec_x0(Cpu *cpu, unsigned y, unsigned z);
+static void exec_x3(Cpu *cpu, unsigned y, unsigned z);
+static void exec_cb(Cpu *cpu);
+
 static uint8_t flags(bool z, bool n, bool h, bool cy) {
 	return (z ? FLAG_Z : 0) | (n ? FLAG_N : 0) | (h ? FLAG_H : 0) | (cy ? FLAG_C : 0);
 }
@@ -335,26 +340,40 @@ static void halt(Cpu *cpu) {
 	}
 }
 
-static void exec_cb(Cpu *cpu) {
+static void exec(Cpu *cpu) {
+	uint16_t start = cpu->pc;
 	uint8_t op = fetch8(cpu);
 	unsigned x = op >> 6;
 	unsigned y = (op >> 3) & 7;
 	unsigned z = op & 7;
-	uint8_t v = get8(cpu, z);
+
+	cpu->trace_pc[cpu->trace_pos] = start;
+	cpu->trace_op[cpu->trace_pos] = op;
+	cpu->trace_pos = (uint8_t)((cpu->trace_pos + 1) & (CPU_TRACE - 1));
 
 	switch (x) {
 	case 0:
-		set8(cpu, z, shift(cpu, y, v));
+		exec_x0(cpu, y, z);
 		break;
 	case 1:
-		cpu->f = flags(!((v >> y) & 1), false, true, cpu->f & FLAG_C);
+		if (y == 6 && z == 6) {
+			halt(cpu);
+		} else {
+			set8(cpu, y, get8(cpu, z));
+		}
 		break;
 	case 2:
-		set8(cpu, z, v & ~(1u << y));
+		alu(cpu, y, get8(cpu, z));
 		break;
 	default:
-		set8(cpu, z, v | (1u << y));
+		exec_x3(cpu, y, z);
 		break;
+	}
+
+	if (cpu->hung && !cpu->faulted) {
+		cpu->faulted = true;
+		cpu->fault_pc = start;
+		cpu->fault_op = op;
 	}
 }
 
@@ -464,6 +483,33 @@ static void exec_x0(Cpu *cpu, unsigned y, unsigned z) {
 			cpu->f = (cpu->f & FLAG_Z) | (~cpu->f & FLAG_C);
 			break;
 		}
+		break;
+	}
+}
+
+static void exec_cb(Cpu *cpu) {
+	uint8_t op = fetch8(cpu);
+	unsigned x = op >> 6;
+	unsigned y = (op >> 3) & 7;
+	unsigned z = op & 7;
+
+	uint8_t value = get8(cpu, z);
+
+	switch (x) {
+	case 0:
+		set8(cpu, z, shift(cpu, y, value));
+		break;
+
+	case 1:
+		cpu->f = (cpu->f & FLAG_C) | FLAG_H | ((value & (1u << y)) ? 0 : FLAG_Z);
+		break;
+
+	case 2:
+		set8(cpu, z, value & ~(1u << y));
+		break;
+
+	case 3:
+		set8(cpu, z, value | (1u << y));
 		break;
 	}
 }
@@ -582,32 +628,6 @@ static void exec_x3(Cpu *cpu, unsigned y, unsigned z) {
 	default:
 		push16(cpu, cpu->pc);
 		cpu->pc = y * 8;
-		break;
-	}
-}
-
-static void exec(Cpu *cpu) {
-	uint8_t op = fetch8(cpu);
-	unsigned x = op >> 6;
-	unsigned y = (op >> 3) & 7;
-	unsigned z = op & 7;
-
-	switch (x) {
-	case 0:
-		exec_x0(cpu, y, z);
-		break;
-	case 1:
-		if (y == 6 && z == 6) {
-			halt(cpu);
-		} else {
-			set8(cpu, y, get8(cpu, z));
-		}
-		break;
-	case 2:
-		alu(cpu, y, get8(cpu, z));
-		break;
-	default:
-		exec_x3(cpu, y, z);
 		break;
 	}
 }

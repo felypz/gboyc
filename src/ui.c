@@ -68,6 +68,21 @@ enum {
 	PAUSE_COUNT,
 };
 
+enum {
+	CR_RESET,
+	CR_LOAD_STATE,
+	CR_LOAD_ROM,
+	CR_MAIN,
+	CR_DISMISS,
+	CR_COUNT,
+};
+
+#define CRASH_CARD_Y 92
+#define CRASH_CARD_H 160
+#define CRASH_LIST_Y 268
+#define CRASH_PITCH	 40
+#define CRASH_ROW_H	 32
+
 #define PAD_ROWS  (JOY_BUTTONS + 2)
 #define PAD_RESET JOY_BUTTONS
 #define PAD_BACK  (JOY_BUTTONS + 1)
@@ -92,6 +107,8 @@ static const char *const MENU_LABELS[MENU_COUNT] = {"Load ROM", "Settings", "Qui
 static const char *const PAUSE_LABELS[PAUSE_COUNT] = {
 	"Continue", "Reset", "Game controls", "Emulator shortcuts", "Load ROM", "Main menu"};
 static const char *const PAUSE_VALUES[PAUSE_COUNT] = {NULL, NULL, ">", ">", NULL, NULL};
+static const char *const CRASH_LABELS[CR_COUNT] = {"Reset", "Load state", "Load ROM", "Main menu",
+												   "Dismiss"};
 
 static const int PAD_ORDER[JOY_BUTTONS] = {2, 3, 1, 0, 4, 5, 6, 7};
 
@@ -104,6 +121,10 @@ static const Hint HINTS_CONTROLS[] = {
 static const Hint HINTS_SHORTCUTS[] = {
 	{"UP/DOWN", "Select"}, {"ENTER", "Rebind"}, {"DEL", "Clear"}, {"ESC", "Back"}};
 static const Hint HINTS_CAPTURE[] = {{"KEY", "Bind"}, {"ESC", "Cancel"}};
+static const Hint HINTS_CRASH[] = {
+	{"UP/DOWN", "Select"},
+	{"ENTER", "Open"},
+};
 
 static ListGeom geom(UiScreen screen) {
 	switch (screen) {
@@ -117,6 +138,8 @@ static ListGeom geom(UiScreen screen) {
 		return (ListGeom){LIST_Y, PAD_ROW_PITCH, PAD_ROW_H, SHORTCUT_ROWS};
 	case UI_SCREEN_PAUSE:
 		return (ListGeom){LIST_Y, ROW_PITCH, ROW_H, PAUSE_COUNT};
+	case UI_SCREEN_CRASH:
+		return (ListGeom){CRASH_LIST_Y, CRASH_PITCH, CRASH_ROW_H, CR_COUNT};
 	default:
 		return (ListGeom){0, 1, 0, 0};
 	}
@@ -184,6 +207,17 @@ void ui_open_pause(Ui *ui) {
 	ui->system_dark = platform_system_dark();
 	ui->screen = UI_SCREEN_PAUSE;
 	ui->in_game = true;
+}
+
+void ui_open_crash(Ui *ui, const CrashReport *report) {
+	Settings *settings = ui->settings;
+
+	memset(ui, 0, sizeof *ui);
+	ui->settings = settings;
+	ui->system_dark = platform_system_dark();
+	ui->screen = UI_SCREEN_CRASH;
+	ui->in_game = true;
+	ui->crash = *report;
 }
 
 void ui_notify(Ui *ui, const char *text, bool warn) {
@@ -497,6 +531,35 @@ static UiAction pause_event(Ui *ui, Platform *p, const PlatformEvent *ev) {
 	return UI_ACTION_NONE;
 }
 
+static UiAction crash_event(Ui *ui, Platform *p, const PlatformEvent *ev) {
+	switch (ev->type) {
+	case PLATFORM_EV_UP:
+		move(ui, -1);
+		break;
+	case PLATFORM_EV_DOWN:
+		move(ui, 1);
+		break;
+	case PLATFORM_EV_CONFIRM:
+		switch (ui->row) {
+		case CR_RESET:
+			return UI_ACTION_RESET;
+		case CR_LOAD_STATE:
+			return UI_ACTION_LOAD_STATE;
+		case CR_LOAD_ROM:
+			open_rom_dialog(ui, p);
+			break;
+		case CR_MAIN:
+			return UI_ACTION_MAIN_MENU;
+		default:
+			return UI_ACTION_RESUME;
+		}
+		break;
+	default:
+		break;
+	}
+	return UI_ACTION_NONE;
+}
+
 static UiAction dispatch(Ui *ui, Platform *p, const PlatformEvent *ev) {
 	switch (ui->screen) {
 	case UI_SCREEN_MENU:
@@ -517,6 +580,8 @@ static UiAction dispatch(Ui *ui, Platform *p, const PlatformEvent *ev) {
 	case UI_SCREEN_SHORTCUTS:
 		shortcuts_event(ui, p, ev);
 		break;
+	case UI_SCREEN_CRASH:
+		return crash_event(ui, p, ev);
 	default:
 		break;
 	}
@@ -531,7 +596,7 @@ static UiAction file_chosen(Ui *ui, const PlatformEvent *ev) {
 		return UI_ACTION_NONE;
 	}
 	if (ui->screen != UI_SCREEN_MENU && ui->screen != UI_SCREEN_DROP &&
-		ui->screen != UI_SCREEN_PAUSE) {
+		ui->screen != UI_SCREEN_PAUSE && ui->screen != UI_SCREEN_CRASH) {
 		return UI_ACTION_NONE;
 	}
 
@@ -763,6 +828,27 @@ static void draw_pause(const Ui *ui, Platform *p, const Theme *t) {
 	draw_hints(p, t, HINTS_PAUSE, COUNT(HINTS_PAUSE));
 }
 
+static void draw_crash(const Ui *ui, Platform *p, const Theme *t) {
+	const CrashReport *r = &ui->crash;
+	ListGeom g = geom(UI_SCREEN_CRASH);
+
+	draw_header(p, t, r->title);
+	fill_card(p, MARGIN_X, CRASH_CARD_Y, CONTENT_W, CRASH_CARD_H, t->surface);
+	platform_fill_rect(p, MARGIN_X + ROW_PAD, CRASH_CARD_Y + 16, 8, 8, t->warn);
+	text_left(p, MARGIN_X + ROW_PAD + 20, CRASH_CARD_Y + 12, SCALE_BODY, t->text, r->reason);
+	for (int i = 0; i < r->line_count; i++) {
+		text_left(p, MARGIN_X + ROW_PAD, CRASH_CARD_Y + 48 + i * 16, SCALE_CAPTION, t->dim,
+				  r->lines[i]);
+	}
+
+	for (int i = 0; i < CR_COUNT; i++) {
+		draw_row(p, t, g.y0 + i * g.pitch, g.h, i == ui->row, CRASH_LABELS[i], NULL, false);
+	}
+
+	draw_status(ui, p, t);
+	draw_hints(p, t, HINTS_CRASH, COUNT(HINTS_CRASH));
+}
+
 static void draw_dashed_rect(Platform *p, int x, int y, int w, int h, uint32_t color) {
 	for (int i = 0; i < w; i += 16) {
 		int len = (w - i < 8) ? w - i : 8;
@@ -967,6 +1053,9 @@ void ui_draw(const Ui *ui, Platform *p) {
 		break;
 	case UI_SCREEN_SHORTCUTS:
 		draw_shortcuts(ui, p, t);
+		break;
+	case UI_SCREEN_CRASH:
+		draw_crash(ui, p, t);
 		break;
 	default:
 		break;

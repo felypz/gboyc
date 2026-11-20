@@ -129,6 +129,9 @@ static void sprite_pixel(const Ppu *p, unsigned bg_id, uint32_t *color) {
 
 		unsigned attr = obj[3];
 		int line = p->ly - (obj[0] - 16);
+		if (line < 0 || line >= height) {
+			continue;
+		}
 		unsigned tile = obj[2];
 
 		if (attr & OBJ_FLIP_Y) {

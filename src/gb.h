@@ -55,7 +55,8 @@ typedef struct Gb {
 void gb_init(Gb *gb, Cartridge *cart, const uint8_t *boot);
 void gb_cycle_begin(Gb *gb);
 void gb_tick(Gb *gb);
-void gb_run_frame(Gb *gb);
+bool gb_run_frame(Gb *gb);
+bool gb_state_sane(const Gb *gb);
 void gb_set_joypad(Gb *gb, uint8_t mask);
 
 void gb_request_irq(Gb *gb, unsigned irq);

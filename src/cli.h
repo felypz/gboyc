@@ -10,6 +10,7 @@
 typedef struct {
 	const char *rom;
 	const char *boot_rom;
+	const char *crash_test;
 	bool no_boot;
 	bool verbose;
 	bool mute;

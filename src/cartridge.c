@@ -401,3 +401,28 @@ void cartridge_log_info(const Cartridge *c) {
 			c->map.rumble ? ", rumble" : "");
 	verbose("ROM: %zu KiB, RAM: %zu bytes", c->rom_size / 1024, c->ram_size);
 }
+
+unsigned cartridge_rom_bank(const Cartridge *c) {
+	size_t offset = mapper_rom_offset(&c->map, 0x4000);
+
+	return (unsigned)((offset / ROM_BANK_SIZE) % (c->rom_size / ROM_BANK_SIZE));
+}
+
+bool cartridge_state_check(const Cartridge *c, const uint8_t *in, size_t size) {
+	if (size != cartridge_state_size(c)) {
+		return false;
+	}
+
+	Mapper m;
+
+	memcpy(&m, in, sizeof m);
+	return m.type == c->map.type && m.multicart == c->map.multicart &&
+		   m.has_timer == c->map.has_timer && m.rumble == c->map.rumble &&
+		   m.rom_size == c->map.rom_size;
+}
+
+void cartridge_discard_changes(Cartridge *c) {
+	if (c) {
+		c->dirty = false;
+	}
+}

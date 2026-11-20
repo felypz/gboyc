@@ -1,13 +1,15 @@
 #include "state.h"
-#include "paths.h"
 
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
+#include "paths.h"
+#include "verbose.h"
+
 #define STATE_MAGIC	  "GBOYCST"
-#define STATE_VERSION 1
+#define STATE_VERSION 2
 #define STATE_SUBDIR  "saves"
 
 typedef struct {
@@ -16,7 +18,18 @@ typedef struct {
 	uint32_t gb_size;
 	uint32_t cart_size;
 	uint32_t cart_id;
+	uint32_t checksum;
 } StateHeader;
+
+static uint32_t checksum(const uint8_t *data, size_t size) {
+	uint32_t h = 2166136261u;
+
+	for (size_t i = 0; i < size; i++) {
+		h ^= data[i];
+		h *= 16777619u;
+	}
+	return h;
+}
 
 void state_path(char *out, size_t size, const char *rom_path, int slot) {
 	const char *name = strrchr(rom_path, '/');
@@ -47,23 +60,28 @@ bool state_save(const Gb *gb, const char *path) {
 	}
 
 	size_t cart_size = cartridge_state_size(gb->cart);
-	size_t total = sizeof(StateHeader) + sizeof *gb + cart_size;
+	size_t payload_size = sizeof *gb + cart_size;
+	size_t total = sizeof(StateHeader) + payload_size;
 	uint8_t *buf = malloc(total);
 
 	if (!buf) {
 		return false;
 	}
 
+	uint8_t *payload = buf + sizeof(StateHeader);
+
+	memcpy(payload, gb, sizeof *gb);
+	cartridge_state_write(gb->cart, payload + sizeof *gb);
+
 	StateHeader h = {
 		.version = STATE_VERSION,
 		.gb_size = (uint32_t)sizeof *gb,
 		.cart_size = (uint32_t)cart_size,
 		.cart_id = cartridge_id(gb->cart),
+		.checksum = checksum(payload, payload_size),
 	};
 	memcpy(h.magic, STATE_MAGIC, sizeof h.magic);
 	memcpy(buf, &h, sizeof h);
-	memcpy(buf + sizeof h, gb, sizeof *gb);
-	cartridge_state_write(gb->cart, buf + sizeof h + sizeof *gb);
 
 	char tmp[STATE_PATH_MAX + 8];
 	snprintf(tmp, sizeof tmp, "%s.tmp", path);
@@ -83,6 +101,29 @@ bool state_save(const Gb *gb, const char *path) {
 	return ok;
 }
 
+static const char *validate(const Gb *gb, const StateHeader *h, const uint8_t *payload,
+							size_t payload_size, size_t cart_size, Gb *scratch) {
+	if (memcmp(h->magic, STATE_MAGIC, sizeof h->magic) != 0 || h->version != STATE_VERSION) {
+		return "unknown format";
+	}
+	if (h->gb_size != sizeof *gb || h->cart_size != cart_size ||
+		h->cart_id != cartridge_id(gb->cart)) {
+		return "different ROM or build";
+	}
+	if (h->checksum != checksum(payload, payload_size)) {
+		return "checksum mismatch";
+	}
+
+	memcpy(scratch, payload, sizeof *scratch);
+	if (!gb_state_sane(scratch)) {
+		return "invalid emulator state";
+	}
+	if (!cartridge_state_check(gb->cart, payload + sizeof *gb, cart_size)) {
+		return "invalid cartridge state";
+	}
+	return NULL;
+}
+
 StateResult state_load(Gb *gb, const char *path) {
 	FILE *f = fopen(path, "rb");
 
@@ -91,35 +132,47 @@ StateResult state_load(Gb *gb, const char *path) {
 	}
 
 	size_t cart_size = cartridge_state_size(gb->cart);
-	size_t total = sizeof(StateHeader) + sizeof *gb + cart_size;
+	size_t payload_size = sizeof *gb + cart_size;
+	size_t total = sizeof(StateHeader) + payload_size;
 	uint8_t *buf = malloc(total + 1);
+	Gb *scratch = malloc(sizeof *scratch);
 
-	if (!buf) {
+	if (!buf || !scratch) {
 		fclose(f);
+		free(buf);
+		free(scratch);
 		return STATE_INVALID;
 	}
 
 	size_t n = fread(buf, 1, total + 1, f);
+
 	fclose(f);
 
 	StateResult result = STATE_INVALID;
-	StateHeader h;
+	const char *why = "size mismatch";
 
 	if (n == total) {
+		StateHeader h;
+		const uint8_t *payload = buf + sizeof h;
+
 		memcpy(&h, buf, sizeof h);
-		if (memcmp(h.magic, STATE_MAGIC, sizeof h.magic) == 0 && h.version == STATE_VERSION &&
-			h.gb_size == sizeof *gb && h.cart_size == cart_size &&
-			h.cart_id == cartridge_id(gb->cart)) {
+		why = validate(gb, &h, payload, payload_size, cart_size, scratch);
+		if (!why) {
 			Cartridge *cart = gb->cart;
 
-			memcpy(gb, buf + sizeof h, sizeof *gb);
+			memcpy(gb, scratch, sizeof *gb);
 			gb->cart = cart;
 			gb->cpu.gb = gb;
-			cartridge_state_read(cart, buf + sizeof h + sizeof *gb, cart_size);
+			gb->step.abort = NULL;
+			cartridge_state_read(cart, payload + sizeof *gb, cart_size);
 			result = STATE_OK;
 		}
 	}
 
+	if (result != STATE_OK) {
+		verbose("State rejected: %s (%s)", why, path);
+	}
 	free(buf);
+	free(scratch);
 	return result;
 }

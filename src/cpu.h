@@ -8,6 +8,8 @@
 #error "cpu.h requires a little-endian host"
 #endif
 
+#define CPU_TRACE 16
+
 #define CPU_REG_PAIR(hi, lo, pair)                                                                 \
 	union {                                                                                        \
 		struct {                                                                                   \
@@ -32,6 +34,12 @@ typedef struct {
 	bool hung;
 	bool stopped;
 	uint8_t ei_delay;
+	bool faulted;
+	uint8_t fault_op;
+	uint16_t fault_pc;
+	uint8_t trace_pos;
+	uint8_t trace_op[CPU_TRACE];
+	uint16_t trace_pc[CPU_TRACE];
 	Gb *gb;
 } Cpu;
 

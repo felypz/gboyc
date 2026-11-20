@@ -104,10 +104,54 @@ void gb_tick(Gb *gb) {
 	dma_tick(gb);
 }
 
-void gb_run_frame(Gb *gb) {
-	do {
+#define MAX_STEPS_PER_FRAME 60000
+#define APU_TIMER_MIN		(-16)
+#define APU_TIMER_MAX		4200000
+
+bool gb_run_frame(Gb *gb) {
+	for (unsigned i = 0; i < MAX_STEPS_PER_FRAME; i++) {
 		cpu_step(&gb->cpu);
-	} while (!ppu_take_frame(&gb->ppu));
+		if (ppu_take_frame(&gb->ppu)) {
+			return true;
+		}
+	}
+	return false;
+}
+
+static bool ppu_sane(const Ppu *p) {
+	if (p->mode > 3 || p->ly >= 154 || p->dot >= 456 || p->lcd_x > PPU_W || p->sprite_count > 10 ||
+		p->sprite_next > p->sprite_count) {
+		return false;
+	}
+	for (unsigned i = 0; i < p->sprite_count; i++) {
+		if (p->sprites[i] >= 40) {
+			return false;
+		}
+	}
+	return true;
+}
+
+static bool apu_sane(const Apu *a) {
+	if (a->fs_step >= 8 || a->sample_count > APU_BUFFER_FRAMES) {
+		return false;
+	}
+	for (unsigned i = 0; i < 4; i++) {
+		const ApuChannel *c = &a->ch[i];
+
+		if (c->duty > 3 || c->pos >= (i == 2 ? 32u : 8u) || c->freq > 2047 || c->length > 256 ||
+			c->timer < APU_TIMER_MIN || c->timer > APU_TIMER_MAX) {
+			return false;
+		}
+	}
+	return true;
+}
+
+bool gb_state_sane(const Gb *gb) {
+	const Dma *d = &gb->dma;
+
+	return ppu_sane(&gb->ppu) && apu_sane(&gb->apu) && (!d->active || d->pos < 160) &&
+		   d->delay <= 2 && gb->timer.reload <= 2 && gb->serial.bits <= 8 &&
+		   gb->cpu.trace_pos < CPU_TRACE;
 }
 
 void gb_set_joypad(Gb *gb, uint8_t mask) {

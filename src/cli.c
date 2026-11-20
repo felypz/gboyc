@@ -3,6 +3,7 @@
 #include <getopt.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 
 #include "paths.h"
 
@@ -18,6 +19,7 @@ enum {
 	OPT_MUTE,
 	OPT_PAUSED,
 	OPT_STATE,
+	OPT_CRASH_TEST,
 };
 
 static const char SHORT_OPTS[] = "r:s:vpVh";
@@ -30,6 +32,7 @@ static const struct option LONG_OPTS[] = {
 	{"mute", no_argument, NULL, OPT_MUTE},
 	{"paused", no_argument, NULL, OPT_PAUSED},
 	{"state", required_argument, NULL, OPT_STATE},
+	{"crash-test", required_argument, NULL, OPT_CRASH_TEST},
 	{"verbose", no_argument, NULL, 'v'},
 	{"paths", no_argument, NULL, 'p'},
 	{"version", no_argument, NULL, 'V'},
@@ -46,17 +49,18 @@ static void print_help(void) {
 		  "  ROM                  ROM file to load (same as --rom)\n"
 		  "\n"
 		  "Options:\n"
-		  "  -r, --rom PATH       Load this ROM at startup\n"
-		  "      --no-boot        Skip the boot animation for this run only\n"
-		  "      --boot-rom PATH  Use this boot ROM for this run only\n"
-		  "  -s, --scale N        Initial window size, 1-10 (default 4)\n"
-		  "      --mute           Disable audio\n"
-		  "      --paused         Start paused (needs a ROM)\n"
-		  "      --state SLOT     Load save state SLOT (1-9) at startup (needs a ROM)\n"
-		  "  -v, --verbose        Print what the emulator is doing to stderr\n"
-		  "  -p, --paths          Print the config and data directories, then exit\n"
-		  "  -V, --version        Print the version, then exit\n"
-		  "  -h, --help           Print this help, then exit\n",
+		  "  -r, --rom PATH         Load this ROM at startup\n"
+		  "      --no-boot          Skip the boot animation for this run only\n"
+		  "      --boot-rom PATH    Use this boot ROM for this run only\n"
+		  "      --crash-test KIND  Run a crash test (segv, abort, fpe, illegal, halt)\n"
+		  "  -s, --scale N          Initial window size, 1-10 (default 4)\n"
+		  "      --mute             Disable audio\n"
+		  "      --paused           Start paused (needs a ROM)\n"
+		  "      --state SLOT       Load save state SLOT (1-9) at startup (needs a ROM)\n"
+		  "  -v, --verbose          Print what the emulator is doing to stderr\n"
+		  "  -p, --paths            Print the config and data directories, then exit\n"
+		  "  -V, --version          Print the version, then exit\n"
+		  "  -h, --help             Print this help, then exit\n",
 		  stdout);
 }
 
@@ -86,6 +90,17 @@ static bool parse_number(const char *text, int min, int max, int *out) {
 	}
 	*out = (int)value;
 	return true;
+}
+
+static bool valid_crash_test(const char *kind) {
+	static const char *const KINDS[] = {"segv", "abort", "fpe", "illegal", "halt"};
+
+	for (size_t i = 0; i < sizeof KINDS / sizeof *KINDS; i++) {
+		if (strcmp(kind, KINDS[i]) == 0) {
+			return true;
+		}
+	}
+	return false;
 }
 
 CliAction cli_parse(CliOptions *o, int argc, char **argv) {
@@ -123,6 +138,12 @@ CliAction cli_parse(CliOptions *o, int argc, char **argv) {
 				return fail("invalid state slot (expected 1-9)", optarg);
 			}
 			break;
+		case OPT_CRASH_TEST:
+			if (!valid_crash_test(optarg)) {
+				return fail("invalid crash test", optarg);
+			}
+			o->crash_test = optarg;
+			break;
 		case 'v':
 			o->verbose = true;
 			break;
@@ -158,6 +179,9 @@ CliAction cli_parse(CliOptions *o, int argc, char **argv) {
 	}
 	if ((o->paused || o->state) && !o->rom) {
 		return fail("--paused and --state need a ROM", NULL);
+	}
+	if (o->crash_test && !o->rom) {
+		return fail("--crash-test needs a ROM", NULL);
 	}
 	return CLI_RUN;
 }

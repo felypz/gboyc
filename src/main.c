@@ -1,4 +1,5 @@
 #include <stdarg.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -7,7 +8,9 @@
 #include "boot.h"
 #include "cartridge.h"
 #include "cli.h"
+#include "crash.h"
 #include "gb.h"
+#include "guard.h"
 #include "paths.h"
 #include "platform.h"
 #include "settings.h"
@@ -20,11 +23,16 @@
 #define OSD_FRAMES		  90
 #define FAST_SPEED		  2
 #define STATS_INTERVAL_MS 1000
+#define CRASH_TEST_FRAMES 60
 
 typedef enum {
 	APP_MENU,
 	APP_RUNNING,
 } AppState;
+
+typedef struct {
+	ShortcutAction action;
+} StepJob;
 
 static AppState app_state = APP_MENU;
 static bool menu_open;
@@ -45,6 +53,11 @@ static char osd[24];
 static unsigned osd_frames;
 static uint64_t stats_start;
 static unsigned stats_frames;
+static bool crashed;
+static bool crash_ignored;
+static CrashReport crash_report;
+static unsigned run_frames;
+static bool crash_pending;
 
 static void osd_show(const char *fmt, ...) {
 	va_list args;
@@ -143,6 +156,8 @@ static bool start_game(const char *path) {
 	speed = 1;
 	slot = 1;
 	osd_frames = 0;
+	crashed = false;
+	crash_ignored = false;
 	printf("ROM loaded: %s\n", cartridge_title(cart));
 	verbose("ROM file: %s", path);
 	cartridge_log_info(cart);
@@ -155,6 +170,8 @@ static void reset_game(Platform *plat) {
 	cartridge_reset(cart);
 	init_gb();
 	paused = false;
+	crashed = false;
+	crash_ignored = false;
 	platform_audio_clear(plat);
 	osd_show("Reset");
 }
@@ -182,6 +199,8 @@ static void close_menu(Platform *plat) {
 static void back_to_main(Platform *plat) {
 	unload_game();
 	menu_open = false;
+	crashed = false;
+	crash_ignored = false;
 	platform_audio_clear(plat);
 	app_state = APP_MENU;
 	ui_init(&ui, &settings);
@@ -203,10 +222,60 @@ static void push_audio(Platform *plat) {
 	}
 }
 
-static void save_state(void) {
+static void enter_crash(Platform *plat) {
+	crashed = true;
+	crash_ignored = false;
+	menu_open = true;
+	ui_open_crash(&ui, &crash_report);
+	platform_audio_clear(plat);
+	crash_print(&crash_report, &gb, verbose_enabled());
+}
+
+static void fault(Platform *plat) {
+	char reason[CRASH_LINE_LEN];
+	char detail[CRASH_LINE_LEN];
+
+	gb.step.abort = NULL;
+	stepper_discard(&stepper);
+	snprintf(reason, sizeof reason, "Emulator fault: %s", guard_signal_name(guard_signal()));
+	snprintf(detail, sizeof detail, "Fault address %#lx",
+			 (unsigned long)(uintptr_t)guard_address());
+	crash_emulator(&crash_report, &gb, reason, detail);
+	cartridge_discard_changes(cart);
+	enter_crash(plat);
+}
+
+static void stall(Platform *plat) {
+	crash_emulator(&crash_report, &gb, "Emulation stalled", "A frame did not finish in time");
+	cartridge_discard_changes(cart);
+	enter_crash(plat);
+}
+
+static void check_guest(Platform *plat) {
+	if (!crash_ignored && crash_detect_game(&gb, &crash_report)) {
+		enter_crash(plat);
+	}
+}
+
+static void commit_job(void *arg) {
+	(void)arg;
+	stepper_commit(&stepper, &gb);
+}
+
+static bool commit_pending(Platform *plat) {
+	if (!stepper.pending || guard_run(commit_job, NULL)) {
+		return true;
+	}
+	fault(plat);
+	return false;
+}
+
+static void save_state(Platform *plat) {
 	char path[STATE_PATH_MAX];
 
-	stepper_commit(&stepper, &gb);
+	if (!commit_pending(plat)) {
+		return;
+	}
 	if (!state_ensure_dir()) {
 		osd_show("Dir error");
 		return;
@@ -227,6 +296,8 @@ static bool load_state(Platform *plat) {
 		stepper_discard(&stepper);
 		platform_audio_clear(plat);
 		drain_audio();
+		crashed = false;
+		crash_ignored = false;
 		osd_show("Loaded slot %d", slot);
 		verbose("State file: %s", path);
 		return true;
@@ -242,11 +313,29 @@ static bool load_state(Platform *plat) {
 }
 
 static void toggle_pause(Platform *plat) {
-	stepper_commit(&stepper, &gb);
+	if (!commit_pending(plat)) {
+		return;
+	}
 	paused = !paused;
 	platform_audio_clear(plat);
 	drain_audio();
 	verbose(paused ? "Paused" : "Resumed");
+}
+
+static void step_job(void *arg) {
+	const StepJob *job = arg;
+
+	switch (job->action) {
+	case SC_STEP_FRAME:
+		stepper_frame(&stepper, &gb);
+		break;
+	case SC_STEP_INSTR:
+		stepper_instruction(&stepper, &gb);
+		break;
+	default:
+		stepper_cycle(&stepper, &gb);
+		break;
+	}
 }
 
 static void step(Platform *plat, ShortcutAction action) {
@@ -258,24 +347,15 @@ static void step(Platform *plat, ShortcutAction action) {
 		gb_set_joypad(&gb, platform_joypad(plat, &settings.bindings));
 	}
 
-	const char *name;
+	StepJob job = {action};
 
-	switch (action) {
-	case SC_STEP_FRAME:
-		stepper_frame(&stepper, &gb);
-		name = "frame";
-		break;
-	case SC_STEP_INSTR:
-		stepper_instruction(&stepper, &gb);
-		name = "instruction";
-		break;
-	default:
-		stepper_cycle(&stepper, &gb);
-		name = "cycle";
-		break;
+	if (!guard_run(step_job, &job)) {
+		fault(plat);
+		return;
 	}
 	drain_audio();
-	verbose("Step %s: PC %04X", name, (unsigned)gb.cpu.pc);
+	verbose("Step: PC %04X", (unsigned)gb.cpu.pc);
+	check_guest(plat);
 }
 
 static void handle_shortcut(Platform *plat, ShortcutAction action) {
@@ -292,7 +372,7 @@ static void handle_shortcut(Platform *plat, ShortcutAction action) {
 		reset_game(plat);
 		break;
 	case SC_SAVE_STATE:
-		save_state();
+		save_state(plat);
 		break;
 	case SC_LOAD_STATE:
 		load_state(plat);
@@ -345,6 +425,33 @@ static bool handle_running_event(Platform *plat, const PlatformEvent *ev) {
 	return true;
 }
 
+static void crash_reset(Platform *plat) {
+	if (crashed && crash_report.kind == CRASH_EMULATOR) {
+		char path[PLATFORM_PATH_MAX];
+
+		snprintf(path, sizeof path, "%s", rom_path);
+		if (!start_game(path)) {
+			ui_notify(&ui, "Could not reload the ROM", true);
+			return;
+		}
+		platform_audio_clear(plat);
+	} else {
+		reset_game(plat);
+	}
+	close_menu(plat);
+}
+
+static void resume_or_dismiss(Platform *plat) {
+	if (!crashed) {
+		close_menu(plat);
+	} else if (crash_report.kind == CRASH_GAME) {
+		crash_ignored = true;
+		close_menu(plat);
+	} else {
+		ui_notify(&ui, "Unavailable after a fault", true);
+	}
+}
+
 static bool handle_ui_event(Platform *plat, const PlatformEvent *ev) {
 	switch (ui_handle_event(&ui, plat, ev)) {
 	case UI_ACTION_QUIT:
@@ -356,12 +463,18 @@ static bool handle_ui_event(Platform *plat, const PlatformEvent *ev) {
 			ui_notify(&ui, "Invalid or unsupported ROM", true);
 		}
 		break;
+	case UI_ACTION_LOAD_STATE:
+		if (load_state(plat)) {
+			close_menu(plat);
+		} else {
+			ui_notify(&ui, "No valid state in this slot", true);
+		}
+		break;
 	case UI_ACTION_RESUME:
-		close_menu(plat);
+		resume_or_dismiss(plat);
 		break;
 	case UI_ACTION_RESET:
-		reset_game(plat);
-		close_menu(plat);
+		crash_reset(plat);
 		break;
 	case UI_ACTION_MAIN_MENU:
 		back_to_main(plat);
@@ -372,17 +485,73 @@ static bool handle_ui_event(Platform *plat, const PlatformEvent *ev) {
 	return true;
 }
 
-static void run_emulation(Platform *plat, unsigned *frames) {
-	gb_set_joypad(&gb, platform_joypad(plat, &settings.bindings));
-	for (int i = 0; i < speed; i++) {
-		gb_run_frame(&gb);
-	}
-	push_audio(plat);
+static void inject_crash(void) {
+	const char *kind = cli.crash_test;
 
+	verbose("Injecting test crash: %s", kind);
+	gb.cpu.ime = false;
+	gb.cpu.halted = false;
+	gb.cpu.ei_delay = 0;
+
+	if (strcmp(kind, "segv") == 0) {
+		int *volatile bad = NULL;
+
+		*bad = 1;
+	} else if (strcmp(kind, "abort") == 0) {
+		abort();
+	} else if (strcmp(kind, "fpe") == 0) {
+		volatile int zero = 0;
+		volatile int result = 1 / zero;
+
+		(void)result;
+	} else if (strcmp(kind, "illegal") == 0) {
+		gb.wram[0] = 0xDD;
+		gb.cpu.pc = 0xC000;
+	} else if (strcmp(kind, "halt") == 0) {
+		gb.wram[0] = 0x76;
+		gb.cpu.pc = 0xC000;
+		gb.ie = 0;
+	}
+}
+
+static void frame_job(void *arg) {
+	bool *complete = arg;
+
+	if (crash_pending) {
+		crash_pending = false;
+		inject_crash();
+	}
+	for (int i = 0; i < speed; i++) {
+		if (!gb_run_frame(&gb)) {
+			*complete = false;
+			return;
+		}
+	}
+}
+
+static void run_emulation(Platform *plat, unsigned *frames) {
+	bool complete = true;
+
+	if (cli.crash_test && run_frames < CRASH_TEST_FRAMES && ++run_frames == CRASH_TEST_FRAMES) {
+		crash_pending = true;
+	}
+
+	gb_set_joypad(&gb, platform_joypad(plat, &settings.bindings));
+	if (!guard_run(frame_job, &complete)) {
+		fault(plat);
+		return;
+	}
+	if (!complete) {
+		stall(plat);
+		return;
+	}
+
+	push_audio(plat);
 	if (++*frames % AUTOSAVE_FRAMES == 0) {
 		cartridge_save(cart);
 	}
 	stats_tick();
+	check_guest(plat);
 }
 
 static void update_cursor(Platform *plat) {
@@ -447,6 +616,7 @@ int main(int argc, char **argv) {
 	}
 
 	verbose_enable(cli.verbose);
+	guard_install();
 	settings_load(&settings);
 	log_startup();
 

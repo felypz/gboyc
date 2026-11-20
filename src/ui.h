@@ -3,6 +3,7 @@
 
 #include <stdbool.h>
 
+#include "crash.h"
 #include "platform.h"
 #include "settings.h"
 
@@ -13,6 +14,7 @@ typedef enum {
 	UI_SCREEN_CONTROLS,
 	UI_SCREEN_SHORTCUTS,
 	UI_SCREEN_PAUSE,
+	UI_SCREEN_CRASH,
 	UI_SCREEN_COUNT,
 } UiScreen;
 
@@ -20,6 +22,7 @@ typedef enum {
 	UI_ACTION_NONE,
 	UI_ACTION_QUIT,
 	UI_ACTION_LOAD_ROM,
+	UI_ACTION_LOAD_STATE,
 	UI_ACTION_RESUME,
 	UI_ACTION_RESET,
 	UI_ACTION_MAIN_MENU,
@@ -40,6 +43,7 @@ typedef struct {
 	bool in_game;
 	char status[48];
 	char rom_path[PLATFORM_PATH_MAX];
+	CrashReport crash;
 	Settings *settings;
 } Ui;
 
@@ -54,6 +58,7 @@ typedef struct {
 
 void ui_init(Ui *ui, Settings *settings);
 void ui_open_pause(Ui *ui);
+void ui_open_crash(Ui *ui, const CrashReport *report);
 void ui_notify(Ui *ui, const char *text, bool warn);
 UiAction ui_handle_event(Ui *ui, Platform *p, const PlatformEvent *ev);
 void ui_draw(const Ui *ui, Platform *p);
