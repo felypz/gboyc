@@ -61,6 +61,15 @@ bool boot_load(const char *name, uint8_t rom[BOOT_ROM_SIZE]) {
 	return result == BOOT_OK;
 }
 
+BootResult boot_load_file(const char *path, uint8_t rom[BOOT_ROM_SIZE]) {
+	BootResult result = read_boot(path, rom);
+
+	if (result == BOOT_OK) {
+		printf("Boot ROM: %s\n", path);
+	}
+	return result;
+}
+
 bool boot_check(const char *name) {
 	char path[PATHS_MAX];
 

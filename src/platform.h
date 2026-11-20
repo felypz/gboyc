@@ -45,7 +45,8 @@ typedef struct {
 	char path[PLATFORM_PATH_MAX];
 } PlatformEvent;
 
-Platform *platform_create(const char *title, int scale);
+Platform *platform_create(const char *title, int scale, bool audio);
+uint64_t platform_ticks_ms(void);
 void platform_destroy(Platform *p);
 
 bool platform_next_event(Platform *p, PlatformEvent *ev);

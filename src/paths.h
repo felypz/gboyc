@@ -12,6 +12,7 @@ typedef enum {
 } PathsRoot;
 
 bool paths_file(PathsRoot root, char *out, size_t size, const char *sub, const char *name);
+bool paths_dir(PathsRoot root, char *out, size_t size);
 bool paths_make(PathsRoot root, const char *sub);
 
 #endif

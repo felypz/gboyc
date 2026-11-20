@@ -96,7 +96,7 @@ static void audio_open(Platform *p) {
 	SDL_ResumeAudioStreamDevice(p->audio);
 }
 
-Platform *platform_create(const char *title, int scale) {
+Platform *platform_create(const char *title, int scale, bool audio) {
 	Platform *p = calloc(1, sizeof *p);
 	if (!p) {
 		return NULL;
@@ -144,7 +144,9 @@ Platform *platform_create(const char *title, int scale) {
 	}
 	SDL_SetTextureScaleMode(p->screen, SDL_SCALEMODE_NEAREST);
 
-	audio_open(p);
+	if (audio) {
+		audio_open(p);
+	}
 
 	p->next_frame_ns = SDL_GetTicksNS();
 	return p;
@@ -461,6 +463,10 @@ void platform_audio_clear(Platform *p) {
 	if (p->audio) {
 		SDL_ClearAudioStream(p->audio);
 	}
+}
+
+uint64_t platform_ticks_ms(void) {
+	return SDL_GetTicks();
 }
 
 void platform_frame_limit(Platform *p) {

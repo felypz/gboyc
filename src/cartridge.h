@@ -24,4 +24,6 @@ size_t cartridge_state_size(const Cartridge *c);
 void cartridge_state_write(const Cartridge *c, uint8_t *out);
 bool cartridge_state_read(Cartridge *c, const uint8_t *in, size_t size);
 
+void cartridge_log_info(const Cartridge *c);
+
 #endif

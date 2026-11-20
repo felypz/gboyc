@@ -6,6 +6,7 @@
 #include <string.h>
 
 #include "mapper.h"
+#include "verbose.h"
 
 #define HDR_LOGO	  0x104
 #define HDR_LOGO_SIZE 0x30
@@ -263,6 +264,7 @@ bool cartridge_save(Cartridge *c) {
 	}
 
 	c->dirty = false;
+	verbose("Battery save written: %s", c->save_path);
 	return true;
 }
 
@@ -386,4 +388,16 @@ void cartridge_reset(Cartridge *c) {
 	c->map.rom_size = old.rom_size;
 	mapper_reset(&c->map);
 	c->map.rtc = old.rtc;
+}
+
+void cartridge_log_info(const Cartridge *c) {
+	static const char *const MBC_NAMES[] = {
+		"ROM only", "MBC1", "MBC2", "MBC3", "MBC5", "HuC1", "HuC3", "MMM01",
+	};
+
+	verbose("Cartridge: %s", c->title[0] ? c->title : "(untitled)");
+	verbose("Mapper: %s%s%s%s%s", MBC_NAMES[c->map.type], c->map.multicart ? ", multicart" : "",
+			c->battery ? ", battery" : "", c->map.has_timer ? ", RTC" : "",
+			c->map.rumble ? ", rumble" : "");
+	verbose("ROM: %zu KiB, RAM: %zu bytes", c->rom_size / 1024, c->ram_size);
 }

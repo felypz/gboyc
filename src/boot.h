@@ -18,6 +18,7 @@ typedef enum {
 bool boot_load(const char *name, uint8_t rom[BOOT_ROM_SIZE]);
 bool boot_check(const char *name);
 BootResult boot_import(const char *src_path, char *name, size_t size);
+BootResult boot_load_file(const char *path, uint8_t rom[BOOT_ROM_SIZE]);
 const char *boot_result_text(BootResult result);
 
 #endif

@@ -58,3 +58,9 @@ bool paths_make(PathsRoot root, const char *sub) {
 	}
 	return n >= 0 && (size_t)n < sizeof dir && platform_make_dir(dir);
 }
+
+bool paths_dir(PathsRoot root, char *out, size_t size) {
+	int n = snprintf(out, size, "%s", base(root));
+
+	return n >= 0 && (size_t)n < size;
+}
