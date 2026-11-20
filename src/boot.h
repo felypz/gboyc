@@ -6,7 +6,6 @@
 #include <stdint.h>
 
 #define BOOT_ROM_SIZE 256
-#define BOOT_DIR	  "config/boot"
 
 typedef enum {
 	BOOT_OK,

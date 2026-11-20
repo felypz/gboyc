@@ -151,7 +151,7 @@ static void save_state(void) {
 	char path[STATE_PATH_MAX];
 
 	stepper_commit(&stepper, &gb);
-	if (!platform_make_dir(STATE_DIR)) {
+	if (!state_ensure_dir()) {
 		osd_show("Dir error");
 		return;
 	}

@@ -6,7 +6,7 @@ OBJS    := $(SRCS:src/%.c=build/%.o)
 CFLAGS  := -std=c11 -Wall -Wextra -Wpedantic -O2 -g -MMD -MP $(shell pkg-config --cflags sdl3)
 LDLIBS  := $(shell pkg-config --libs sdl3)
 
-all: $(TARGET) | config/boot
+all: $(TARGET)
 
 $(TARGET): $(OBJS)
 	$(CC) $^ $(LDLIBS) -o $@

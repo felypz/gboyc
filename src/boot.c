@@ -4,9 +4,9 @@
 #include <stdio.h>
 #include <string.h>
 
-#include "platform.h"
+#include "paths.h"
 
-#define BOOT_FILE_MAX 128
+#define BOOT_SUBDIR "boot"
 
 static BootResult validate(const uint8_t *data, size_t size) {
 	if (size != BOOT_ROM_SIZE) {
@@ -40,14 +40,16 @@ static BootResult read_boot(const char *path, uint8_t rom[BOOT_ROM_SIZE]) {
 	return result;
 }
 
-static void boot_path(char *out, size_t size, const char *name) {
-	snprintf(out, size, "%s/%s", BOOT_DIR, name);
+static bool boot_path(char *out, size_t size, const char *name) {
+	return paths_file(PATHS_DATA, out, size, BOOT_SUBDIR, name);
 }
 
 bool boot_load(const char *name, uint8_t rom[BOOT_ROM_SIZE]) {
-	char path[BOOT_FILE_MAX];
+	char path[PATHS_MAX];
 
-	boot_path(path, sizeof path, name);
+	if (!boot_path(path, sizeof path, name)) {
+		return false;
+	}
 
 	BootResult result = read_boot(path, rom);
 
@@ -60,10 +62,9 @@ bool boot_load(const char *name, uint8_t rom[BOOT_ROM_SIZE]) {
 }
 
 bool boot_check(const char *name) {
-	char path[BOOT_FILE_MAX];
+	char path[PATHS_MAX];
 
-	boot_path(path, sizeof path, name);
-	return read_boot(path, NULL) == BOOT_OK;
+	return boot_path(path, sizeof path, name) && read_boot(path, NULL) == BOOT_OK;
 }
 
 static void make_name(char *out, size_t size, const char *src) {
@@ -104,14 +105,13 @@ BootResult boot_import(const char *src_path, char *name, size_t size) {
 	}
 
 	make_name(name, size, src_path);
-	if (!platform_make_dir(BOOT_DIR)) {
+
+	char dest[PATHS_MAX];
+	char tmp[PATHS_MAX + 8];
+
+	if (!paths_make(PATHS_DATA, BOOT_SUBDIR) || !boot_path(dest, sizeof dest, name)) {
 		return BOOT_ERR_WRITE;
 	}
-
-	char dest[BOOT_FILE_MAX];
-	char tmp[BOOT_FILE_MAX + 8];
-
-	boot_path(dest, sizeof dest, name);
 	snprintf(tmp, sizeof tmp, "%s.tmp", dest);
 
 	FILE *f = fopen(tmp, "wb");

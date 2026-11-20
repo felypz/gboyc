@@ -1,4 +1,5 @@
 #include "state.h"
+#include "paths.h"
 
 #include <stdint.h>
 #include <stdio.h>
@@ -7,6 +8,7 @@
 
 #define STATE_MAGIC	  "GBOYCST"
 #define STATE_VERSION 1
+#define STATE_SUBDIR  "saves"
 
 typedef struct {
 	char magic[8];
@@ -26,10 +28,24 @@ void state_path(char *out, size_t size, const char *rom_path, int slot) {
 	if (dot && dot != name) {
 		len = (size_t)(dot - name);
 	}
-	snprintf(out, size, "%s/%.*s.state%d", STATE_DIR, (int)len, name, slot);
+
+	char file[256];
+
+	snprintf(file, sizeof file, "%.*s.state%d", (int)len, name, slot);
+	if (!paths_file(PATHS_DATA, out, size, STATE_SUBDIR, file)) {
+		out[0] = '\0';
+	}
+}
+
+bool state_ensure_dir(void) {
+	return paths_make(PATHS_DATA, STATE_SUBDIR);
 }
 
 bool state_save(const Gb *gb, const char *path) {
+	if (!path[0]) {
+		return false;
+	}
+
 	size_t cart_size = cartridge_state_size(gb->cart);
 	size_t total = sizeof(StateHeader) + sizeof *gb + cart_size;
 	uint8_t *buf = malloc(total);

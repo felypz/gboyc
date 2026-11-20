@@ -16,6 +16,7 @@ typedef enum {
 } StateResult;
 
 void state_path(char *out, size_t size, const char *rom_path, int slot);
+bool state_ensure_dir(void);
 bool state_save(const Gb *gb, const char *path);
 StateResult state_load(Gb *gb, const char *path);
 

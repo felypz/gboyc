@@ -3,10 +3,10 @@
 #include <stdio.h>
 #include <string.h>
 
+#include "paths.h"
 #include "platform.h"
 
-#define SETTINGS_DIR	  "config"
-#define SETTINGS_PATH	  "config/settings.cfg"
+#define SETTINGS_FILE	  "settings.cfg"
 #define DEFAULT_BOOT_FILE "dmg_boot.bin"
 
 void settings_defaults(Settings *s) {
@@ -54,7 +54,13 @@ static void parse_line(Settings *s, char *line) {
 void settings_load(Settings *s) {
 	settings_defaults(s);
 
-	FILE *f = fopen(SETTINGS_PATH, "r");
+	char path[PATHS_MAX];
+
+	if (!paths_file(PATHS_CONFIG, path, sizeof path, NULL, SETTINGS_FILE)) {
+		return;
+	}
+
+	FILE *f = fopen(path, "r");
 	if (!f) {
 		return;
 	}
@@ -68,12 +74,14 @@ void settings_load(Settings *s) {
 }
 
 bool settings_save(const Settings *s) {
-	if (!platform_make_dir(SETTINGS_DIR)) {
+	char path[PATHS_MAX];
+	char tmp[PATHS_MAX + 8];
+
+	if (!paths_make(PATHS_CONFIG, NULL) ||
+		!paths_file(PATHS_CONFIG, path, sizeof path, NULL, SETTINGS_FILE)) {
 		return false;
 	}
-
-	char tmp[sizeof SETTINGS_PATH + 8];
-	snprintf(tmp, sizeof tmp, "%s.tmp", SETTINGS_PATH);
+	snprintf(tmp, sizeof tmp, "%s.tmp", path);
 
 	FILE *f = fopen(tmp, "w");
 	if (!f) {
@@ -84,7 +92,7 @@ bool settings_save(const Settings *s) {
 			theme_mode_key(s->theme));
 	bindings_write(&s->bindings, f);
 
-	bool ok = fclose(f) == 0 && rename(tmp, SETTINGS_PATH) == 0;
+	bool ok = fclose(f) == 0 && rename(tmp, path) == 0;
 	if (!ok) {
 		remove(tmp);
 	}
