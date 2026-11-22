@@ -2,14 +2,16 @@
 
 #include <string.h>
 
+#include "palette.h"
+
 static const Theme DARK = {
 	.bg = 0xFF121614,
 	.surface = 0xFF1D2321,
 	.line = 0xFF2C3532,
 	.text = 0xFFE8EDE6,
 	.dim = 0xFF8C9A92,
-	.accent = 0xFF9BBC0F,
-	.on_accent = 0xFF0F380F,
+	.accent = DMG_COLOR_0,
+	.on_accent = DMG_COLOR_3,
 	.warn = 0xFFF2B84B,
 };
 
@@ -19,7 +21,7 @@ static const Theme LIGHT = {
 	.line = 0xFFD3DACB,
 	.text = 0xFF18211B,
 	.dim = 0xFF68756B,
-	.accent = 0xFF306230,
+	.accent = DMG_COLOR_2,
 	.on_accent = 0xFFF4F7EA,
 	.warn = 0xFFB45309,
 };
@@ -33,12 +35,16 @@ const Theme *theme_get(ThemeMode mode, bool system_dark) {
 	return dark ? &DARK : &LIGHT;
 }
 
+static ThemeMode valid_mode(ThemeMode mode) {
+	return (unsigned)mode < THEME_COUNT ? mode : THEME_AUTO;
+}
+
 const char *theme_mode_name(ThemeMode mode) {
-	return NAMES[mode];
+	return NAMES[valid_mode(mode)];
 }
 
 const char *theme_mode_key(ThemeMode mode) {
-	return KEYS[mode];
+	return KEYS[valid_mode(mode)];
 }
 
 ThemeMode theme_mode_parse(const char *key) {

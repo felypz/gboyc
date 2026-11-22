@@ -6,20 +6,27 @@
 #include <string.h>
 
 #include "apu.h"
+#include "timing.h"
 
-#define GB_FRAME_NS			   16742706ULL
+#define NS_PER_SECOND		   1000000000ULL
+#define FRAME_NS			   (GB_DOTS_PER_FRAME * NS_PER_SECOND / GB_CPU_HZ)
 #define AUDIO_CHANNELS		   2
 #define AUDIO_FRAME_BYTES	   (AUDIO_CHANNELS * (int)sizeof(float))
 #define AUDIO_MAX_QUEUED_BYTES (APU_SAMPLE_RATE / 10 * AUDIO_FRAME_BYTES)
 #define AUDIO_PRIME_FRAMES	   1024
 
+_Static_assert(PLATFORM_GLYPH_W == SDL_DEBUG_TEXT_FONT_CHARACTER_SIZE &&
+				   PLATFORM_GLYPH_H == SDL_DEBUG_TEXT_FONT_CHARACTER_SIZE,
+			   "PLATFORM_GLYPH_* must match SDL's debug font");
+
+/* Result codes carried in the user event that reports a file dialog outcome. */
 enum { DIALOG_CHOSEN, DIALOG_CANCELED, DIALOG_FAILED };
 
 struct Platform {
 	SDL_Window *window;
 	SDL_Renderer *renderer;
-	SDL_Texture *texture;
-	SDL_Texture *screen;
+	SDL_Texture *frame_texture; /* PPU_W x PPU_H, streamed from the emulator framebuffer */
+	SDL_Texture *ui_target;		/* UI_VIEW_W x UI_VIEW_H, everything is drawn here first */
 	SDL_AudioStream *audio;
 	uint64_t next_frame_ns;
 	Uint32 dialog_event;
@@ -32,36 +39,37 @@ static void set_color(Platform *p, uint32_t argb) {
 						   (argb >> 24) & 0xFF);
 }
 
-static void use_screen(Platform *p) {
-	if (SDL_GetRenderTarget(p->renderer) != p->screen) {
-		SDL_SetRenderTarget(p->renderer, p->screen);
+static void use_ui_target(Platform *p) {
+	if (SDL_GetRenderTarget(p->renderer) != p->ui_target) {
+		SDL_SetRenderTarget(p->renderer, p->ui_target);
 	}
 }
 
+/* Largest integer-scaled (or, in tiny windows, fractional) centered rect for the UI canvas. */
 static SDL_FRect present_rect(Platform *p) {
 	int w = 0;
 	int h = 0;
 
 	SDL_GetRenderOutputSize(p->renderer, &w, &h);
 
-	int scale = w / GB_SCREEN_W;
-	if (h / GB_SCREEN_H < scale) {
-		scale = h / GB_SCREEN_H;
+	int scale = w / PPU_W;
+	if (h / PPU_H < scale) {
+		scale = h / PPU_H;
 	}
 
 	float rw;
 	float rh;
 
 	if (scale >= 1) {
-		rw = (float)(GB_SCREEN_W * scale);
-		rh = (float)(GB_SCREEN_H * scale);
+		rw = (float)(PPU_W * scale);
+		rh = (float)(PPU_H * scale);
 	} else {
-		float sx = (float)w / GB_SCREEN_W;
-		float sy = (float)h / GB_SCREEN_H;
+		float sx = (float)w / PPU_W;
+		float sy = (float)h / PPU_H;
 		float s = sx < sy ? sx : sy;
 
-		rw = GB_SCREEN_W * s;
-		rh = GB_SCREEN_H * s;
+		rw = PPU_W * s;
+		rh = PPU_H * s;
 	}
 
 	SDL_FRect rect = {(float)(int)(((float)w - rw) / 2), (float)(int)(((float)h - rh) / 2), rw, rh};
@@ -114,8 +122,7 @@ Platform *platform_create(const char *title, int scale, bool audio) {
 		goto fail;
 	}
 
-	p->window =
-		SDL_CreateWindow(title, GB_SCREEN_W * scale, GB_SCREEN_H * scale, SDL_WINDOW_RESIZABLE);
+	p->window = SDL_CreateWindow(title, PPU_W * scale, PPU_H * scale, SDL_WINDOW_RESIZABLE);
 	if (!p->window) {
 		fprintf(stderr, "SDL_CreateWindow: %s\n", SDL_GetError());
 		goto fail;
@@ -128,21 +135,21 @@ Platform *platform_create(const char *title, int scale, bool audio) {
 	}
 	SDL_SetRenderDrawBlendMode(p->renderer, SDL_BLENDMODE_BLEND);
 
-	p->texture = SDL_CreateTexture(p->renderer, SDL_PIXELFORMAT_ARGB8888,
-								   SDL_TEXTUREACCESS_STREAMING, GB_SCREEN_W, GB_SCREEN_H);
-	if (!p->texture) {
+	p->frame_texture = SDL_CreateTexture(p->renderer, SDL_PIXELFORMAT_ARGB8888,
+										 SDL_TEXTUREACCESS_STREAMING, PPU_W, PPU_H);
+	if (!p->frame_texture) {
 		fprintf(stderr, "SDL_CreateTexture: %s\n", SDL_GetError());
 		goto fail;
 	}
-	SDL_SetTextureScaleMode(p->texture, SDL_SCALEMODE_NEAREST);
+	SDL_SetTextureScaleMode(p->frame_texture, SDL_SCALEMODE_NEAREST);
 
-	p->screen = SDL_CreateTexture(p->renderer, SDL_PIXELFORMAT_ARGB8888, SDL_TEXTUREACCESS_TARGET,
-								  UI_VIEW_W, UI_VIEW_H);
-	if (!p->screen) {
+	p->ui_target = SDL_CreateTexture(p->renderer, SDL_PIXELFORMAT_ARGB8888,
+									 SDL_TEXTUREACCESS_TARGET, UI_VIEW_W, UI_VIEW_H);
+	if (!p->ui_target) {
 		fprintf(stderr, "SDL_CreateTexture: %s\n", SDL_GetError());
 		goto fail;
 	}
-	SDL_SetTextureScaleMode(p->screen, SDL_SCALEMODE_NEAREST);
+	SDL_SetTextureScaleMode(p->ui_target, SDL_SCALEMODE_NEAREST);
 
 	if (audio) {
 		audio_open(p);
@@ -163,11 +170,11 @@ void platform_destroy(Platform *p) {
 	if (p->audio) {
 		SDL_DestroyAudioStream(p->audio);
 	}
-	if (p->screen) {
-		SDL_DestroyTexture(p->screen);
+	if (p->ui_target) {
+		SDL_DestroyTexture(p->ui_target);
 	}
-	if (p->texture) {
-		SDL_DestroyTexture(p->texture);
+	if (p->frame_texture) {
+		SDL_DestroyTexture(p->frame_texture);
 	}
 	if (p->renderer) {
 		SDL_DestroyRenderer(p->renderer);
@@ -280,15 +287,15 @@ bool platform_next_event(Platform *p, PlatformEvent *out) {
 
 void platform_default_pad(Bindings *b) {
 	memset(b->pad, 0, sizeof b->pad);
-	b->pad[0][0] = SDL_SCANCODE_RIGHT;
-	b->pad[1][0] = SDL_SCANCODE_LEFT;
-	b->pad[2][0] = SDL_SCANCODE_UP;
-	b->pad[3][0] = SDL_SCANCODE_DOWN;
-	b->pad[4][0] = SDL_SCANCODE_Z;
-	b->pad[5][0] = SDL_SCANCODE_X;
-	b->pad[6][0] = SDL_SCANCODE_BACKSPACE;
-	b->pad[6][1] = SDL_SCANCODE_RSHIFT;
-	b->pad[7][0] = SDL_SCANCODE_RETURN;
+	b->pad[JOY_BTN_RIGHT][0] = SDL_SCANCODE_RIGHT;
+	b->pad[JOY_BTN_LEFT][0] = SDL_SCANCODE_LEFT;
+	b->pad[JOY_BTN_UP][0] = SDL_SCANCODE_UP;
+	b->pad[JOY_BTN_DOWN][0] = SDL_SCANCODE_DOWN;
+	b->pad[JOY_BTN_A][0] = SDL_SCANCODE_Z;
+	b->pad[JOY_BTN_B][0] = SDL_SCANCODE_X;
+	b->pad[JOY_BTN_SELECT][0] = SDL_SCANCODE_BACKSPACE;
+	b->pad[JOY_BTN_SELECT][1] = SDL_SCANCODE_RSHIFT;
+	b->pad[JOY_BTN_START][0] = SDL_SCANCODE_RETURN;
 }
 
 void platform_default_shortcuts(Bindings *b) {
@@ -300,15 +307,16 @@ void platform_default_shortcuts(Bindings *b) {
 	b->shortcut[SC_LOAD_STATE] = SDL_SCANCODE_F9;
 	b->shortcut[SC_STEP_FRAME] = SDL_SCANCODE_N;
 	b->shortcut[SC_STEP_INSTR] = SDL_SCANCODE_I;
-	b->shortcut[SC_STEP_CYCLE] = SDL_SCANCODE_C;
+	b->shortcut[SC_STEP_MCYCLE] = SDL_SCANCODE_C;
 }
 
 const char *platform_key_name(int scancode) {
 	return SDL_GetScancodeName((SDL_Scancode)scancode);
 }
 
+/* KEY_NONE (an unbound slot) counts as valid: it is what unbinding stores. */
 bool platform_key_valid(int scancode) {
-	return scancode >= 0 && scancode < SDL_SCANCODE_COUNT;
+	return scancode >= KEY_NONE && scancode < SDL_SCANCODE_COUNT;
 }
 
 int platform_slot_for_key(int scancode) {
@@ -330,8 +338,7 @@ bool platform_system_dark(void) {
 	return SDL_GetSystemTheme() != SDL_SYSTEM_THEME_LIGHT;
 }
 
-void platform_show_cursor(Platform *p, bool show) {
-	(void)p;
+void platform_show_cursor(bool show) {
 	if (show) {
 		SDL_ShowCursor();
 	} else {
@@ -339,17 +346,16 @@ void platform_show_cursor(Platform *p, bool show) {
 	}
 }
 
-uint8_t platform_joypad(const Platform *p, const Bindings *bindings) {
-	(void)p;
+uint8_t platform_joypad(const Bindings *bindings) {
 	const bool *keys = SDL_GetKeyboardState(NULL);
 	uint8_t mask = 0;
 
-	for (int b = 0; b < JOY_BUTTONS; b++) {
+	for (int button = 0; button < JOY_BTN_COUNT; button++) {
 		for (int s = 0; s < BIND_KEY_SLOTS; s++) {
-			int scancode = bindings->pad[b][s];
+			int scancode = bindings->pad[button][s];
 
-			if (scancode > 0 && platform_key_valid(scancode) && keys[scancode]) {
-				mask |= (uint8_t)(1u << b);
+			if (scancode != KEY_NONE && platform_key_valid(scancode) && keys[scancode]) {
+				mask |= JOY_MASK(button);
 			}
 		}
 	}
@@ -377,7 +383,7 @@ static void SDLCALL on_file_dialog(void *userdata, const char *const *filelist, 
 	}
 }
 
-void platform_open_file_dialog(Platform *p, bool boot) {
+void platform_open_file_dialog(Platform *p, PlatformDialog kind) {
 	static const SDL_DialogFileFilter rom_filters[] = {
 		{"Game Boy ROMs", "gb;gbc"},
 		{"All files", "*"},
@@ -388,7 +394,8 @@ void platform_open_file_dialog(Platform *p, bool boot) {
 	};
 
 	SDL_ShowOpenFileDialog(on_file_dialog, (void *)(uintptr_t)p->dialog_event, p->window,
-						   boot ? boot_filters : rom_filters, 2, NULL, false);
+						   kind == PLATFORM_DIALOG_BOOT_ROM ? boot_filters : rom_filters, 2, NULL,
+						   false);
 }
 
 bool platform_make_dir(const char *path) {
@@ -396,7 +403,7 @@ bool platform_make_dir(const char *path) {
 }
 
 void platform_clear(Platform *p, uint32_t argb) {
-	use_screen(p);
+	use_ui_target(p);
 	set_color(p, argb);
 	SDL_RenderClear(p->renderer);
 }
@@ -404,31 +411,25 @@ void platform_clear(Platform *p, uint32_t argb) {
 void platform_fill_rect(Platform *p, int x, int y, int w, int h, uint32_t argb) {
 	SDL_FRect rect = {(float)x, (float)y, (float)w, (float)h};
 
-	use_screen(p);
+	use_ui_target(p);
 	set_color(p, argb);
 	SDL_RenderFillRect(p->renderer, &rect);
 }
 
 void platform_draw_text(Platform *p, int x, int y, int scale, uint32_t argb, const char *text) {
-	use_screen(p);
+	use_ui_target(p);
 	set_color(p, argb);
 	SDL_SetRenderScale(p->renderer, (float)scale, (float)scale);
 	SDL_RenderDebugText(p->renderer, (float)x / scale, (float)y / scale, text);
 	SDL_SetRenderScale(p->renderer, 1.0f, 1.0f);
 }
 
-void platform_draw_text_centered(Platform *p, int y, int scale, uint32_t argb, const char *text) {
-	int w = (int)strlen(text) * SDL_DEBUG_TEXT_FONT_CHARACTER_SIZE * scale;
-
-	platform_draw_text(p, (UI_VIEW_W - w) / 2, y, scale, argb, text);
-}
-
 void platform_draw_frame(Platform *p, const uint32_t *framebuffer) {
-	use_screen(p);
-	SDL_UpdateTexture(p->texture, NULL, framebuffer, GB_SCREEN_W * (int)sizeof(uint32_t));
+	use_ui_target(p);
+	SDL_UpdateTexture(p->frame_texture, NULL, framebuffer, PPU_W * (int)sizeof(uint32_t));
 	SDL_SetRenderDrawColor(p->renderer, 0, 0, 0, 255);
 	SDL_RenderClear(p->renderer);
-	SDL_RenderTexture(p->renderer, p->texture, NULL, NULL);
+	SDL_RenderTexture(p->renderer, p->frame_texture, NULL, NULL);
 }
 
 void platform_flip(Platform *p) {
@@ -438,7 +439,7 @@ void platform_flip(Platform *p) {
 
 	set_color(p, p->background);
 	SDL_RenderClear(p->renderer);
-	SDL_RenderTexture(p->renderer, p->screen, NULL, &dst);
+	SDL_RenderTexture(p->renderer, p->ui_target, NULL, &dst);
 	SDL_RenderPresent(p->renderer);
 }
 
@@ -476,5 +477,5 @@ void platform_frame_limit(Platform *p) {
 	} else {
 		p->next_frame_ns = now;
 	}
-	p->next_frame_ns += GB_FRAME_NS;
+	p->next_frame_ns += FRAME_NS;
 }
