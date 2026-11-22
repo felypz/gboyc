@@ -4,10 +4,13 @@
 #include <stdio.h>
 #include <string.h>
 
+#include "file_util.h"
+#include "log.h"
 #include "paths.h"
 
 #define BOOT_SUBDIR "boot"
 
+/* The DMG boot ROM starts with LD SP,$FFFE and ends with LDH ($50),A. */
 static BootResult validate(const uint8_t *data, size_t size) {
 	if (size != BOOT_ROM_SIZE) {
 		return BOOT_ERR_SIZE;
@@ -21,13 +24,15 @@ static BootResult validate(const uint8_t *data, size_t size) {
 	return BOOT_OK;
 }
 
-static BootResult read_boot(const char *path, uint8_t rom[BOOT_ROM_SIZE]) {
+/* rom may be NULL to only validate. */
+static BootResult read_boot(const char *path, uint8_t *rom) {
 	FILE *f = fopen(path, "rb");
+
 	if (!f) {
 		return BOOT_ERR_OPEN;
 	}
 
-	uint8_t buf[BOOT_ROM_SIZE + 1];
+	uint8_t buf[BOOT_ROM_SIZE + 1]; /* one extra byte detects oversized files */
 	size_t n = fread(buf, 1, sizeof buf, f);
 
 	fclose(f);
@@ -40,23 +45,23 @@ static BootResult read_boot(const char *path, uint8_t rom[BOOT_ROM_SIZE]) {
 	return result;
 }
 
-static bool boot_path(char *out, size_t size, const char *name) {
+static bool installed_path(char *out, size_t size, const char *name) {
 	return paths_file(PATHS_DATA, out, size, BOOT_SUBDIR, name);
 }
 
-bool boot_load(const char *name, uint8_t rom[BOOT_ROM_SIZE]) {
+bool boot_load_installed(const char *name, uint8_t rom[BOOT_ROM_SIZE]) {
 	char path[PATHS_MAX];
 
-	if (!boot_path(path, sizeof path, name)) {
+	if (!installed_path(path, sizeof path, name)) {
 		return false;
 	}
 
 	BootResult result = read_boot(path, rom);
 
 	if (result == BOOT_OK) {
-		printf("Boot ROM: %s\n", path);
+		log_info("Boot ROM: %s", path);
 	} else if (result != BOOT_ERR_OPEN) {
-		fprintf(stderr, "boot: '%s' is not a valid DMG boot ROM, ignoring\n", path);
+		log_error("boot: '%s' is not a valid DMG boot ROM, ignoring", path);
 	}
 	return result == BOOT_OK;
 }
@@ -65,17 +70,18 @@ BootResult boot_load_file(const char *path, uint8_t rom[BOOT_ROM_SIZE]) {
 	BootResult result = read_boot(path, rom);
 
 	if (result == BOOT_OK) {
-		printf("Boot ROM: %s\n", path);
+		log_info("Boot ROM: %s", path);
 	}
 	return result;
 }
 
-bool boot_check(const char *name) {
+bool boot_is_installed(const char *name) {
 	char path[PATHS_MAX];
 
-	return boot_path(path, sizeof path, name) && read_boot(path, NULL) == BOOT_OK;
+	return installed_path(path, sizeof path, name) && read_boot(path, NULL) == BOOT_OK;
 }
 
+/* "/x/My Boot.rom" -> "My_Boot.bin": keeps only [A-Za-z0-9_-] and forces a .bin extension. */
 static void make_name(char *out, size_t size, const char *src) {
 	const char *base = strrchr(src, '/');
 
@@ -88,7 +94,7 @@ static void make_name(char *out, size_t size, const char *src) {
 		len = (size_t)(dot - base);
 	}
 	if (len > size - 5) {
-		len = size - 5;
+		len = size - 5; /* room for ".bin" and the terminator */
 	}
 
 	size_t n = 0;
@@ -116,22 +122,9 @@ BootResult boot_import(const char *src_path, char *name, size_t size) {
 	make_name(name, size, src_path);
 
 	char dest[PATHS_MAX];
-	char tmp[PATHS_MAX + 8];
 
-	if (!paths_make(PATHS_DATA, BOOT_SUBDIR) || !boot_path(dest, sizeof dest, name)) {
-		return BOOT_ERR_WRITE;
-	}
-	snprintf(tmp, sizeof tmp, "%s.tmp", dest);
-
-	FILE *f = fopen(tmp, "wb");
-	bool ok = f && fwrite(rom, 1, BOOT_ROM_SIZE, f) == BOOT_ROM_SIZE;
-
-	if (f) {
-		ok = (fclose(f) == 0) && ok;
-	}
-	ok = ok && rename(tmp, dest) == 0;
-	if (!ok) {
-		remove(tmp);
+	if (!paths_make(PATHS_DATA, BOOT_SUBDIR) || !installed_path(dest, sizeof dest, name) ||
+		!file_write_atomic(dest, rom, BOOT_ROM_SIZE)) {
 		return BOOT_ERR_WRITE;
 	}
 	return BOOT_OK;
@@ -147,7 +140,8 @@ const char *boot_result_text(BootResult result) {
 		return "Must be exactly 256 bytes";
 	case BOOT_ERR_INVALID:
 		return "Not a DMG boot ROM";
-	default:
+	case BOOT_ERR_WRITE:
 		return "Could not copy file";
 	}
+	return "Unknown error";
 }

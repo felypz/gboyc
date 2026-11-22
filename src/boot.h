@@ -15,9 +15,12 @@ typedef enum {
 	BOOT_ERR_WRITE,
 } BootResult;
 
-bool boot_load(const char *name, uint8_t rom[BOOT_ROM_SIZE]);
-bool boot_check(const char *name);
+/* Boot ROMs installed in the data dir's boot/ folder, addressed by file name. */
+bool boot_load_installed(const char *name, uint8_t rom[BOOT_ROM_SIZE]);
+bool boot_is_installed(const char *name);
+/* Validates src_path and copies it into boot/; the stored name is written to name. */
 BootResult boot_import(const char *src_path, char *name, size_t size);
+/* Loads and validates an arbitrary file path (used by --boot-rom). */
 BootResult boot_load_file(const char *path, uint8_t rom[BOOT_ROM_SIZE]);
 const char *boot_result_text(BootResult result);
 
