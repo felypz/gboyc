@@ -3,21 +3,23 @@
 #include <stdio.h>
 #include <string.h>
 
+#include "file_util.h"
 #include "paths.h"
 #include "platform.h"
 
-#define SETTINGS_FILE	  "settings.cfg"
-#define DEFAULT_BOOT_FILE "dmg_boot.bin"
+#define SETTINGS_FILE		  "settings.cfg"
+#define DEFAULT_BOOT_ROM_FILE "dmg_boot.bin"
 
 void settings_defaults(Settings *s) {
 	memset(s, 0, sizeof *s);
-	s->boot_enabled = true;
-	snprintf(s->boot_file, sizeof s->boot_file, "%s", DEFAULT_BOOT_FILE);
+	s->boot_rom_enabled = true;
+	snprintf(s->boot_rom_file, sizeof s->boot_rom_file, "%s", DEFAULT_BOOT_ROM_FILE);
 	s->theme = THEME_AUTO;
 	platform_default_pad(&s->bindings);
 	platform_default_shortcuts(&s->bindings);
 }
 
+/* The boot ROM is looked up inside the data dir, so it must be a bare file name. */
 static bool valid_file_name(const char *name) {
 	size_t len = strlen(name);
 
@@ -29,20 +31,20 @@ static void parse_line(Settings *s, char *line) {
 	line[strcspn(line, "\r\n")] = '\0';
 
 	char *eq = strchr(line, '=');
+
 	if (!eq) {
 		return;
 	}
-
 	*eq = '\0';
 
 	const char *name = line;
 	const char *value = eq + 1;
 
-	if (strcmp(name, "boot") == 0) {
-		s->boot_enabled = strcmp(value, "off") != 0;
-	} else if (strcmp(name, "boot_file") == 0) {
+	if (strcmp(name, "boot_rom") == 0) {
+		s->boot_rom_enabled = strcmp(value, "off") != 0;
+	} else if (strcmp(name, "boot_rom_file") == 0) {
 		if (valid_file_name(value)) {
-			snprintf(s->boot_file, sizeof s->boot_file, "%s", value);
+			snprintf(s->boot_rom_file, sizeof s->boot_rom_file, "%s", value);
 		}
 	} else if (strcmp(name, "theme") == 0) {
 		s->theme = theme_mode_parse(value);
@@ -61,6 +63,7 @@ void settings_load(Settings *s) {
 	}
 
 	FILE *f = fopen(path, "r");
+
 	if (!f) {
 		return;
 	}
@@ -75,26 +78,16 @@ void settings_load(Settings *s) {
 
 bool settings_save(const Settings *s) {
 	char path[PATHS_MAX];
-	char tmp[PATHS_MAX + 8];
+	AtomicFile out;
 
 	if (!paths_make(PATHS_CONFIG, NULL) ||
-		!paths_file(PATHS_CONFIG, path, sizeof path, NULL, SETTINGS_FILE)) {
-		return false;
-	}
-	snprintf(tmp, sizeof tmp, "%s.tmp", path);
-
-	FILE *f = fopen(tmp, "w");
-	if (!f) {
+		!paths_file(PATHS_CONFIG, path, sizeof path, NULL, SETTINGS_FILE) ||
+		!atomic_file_open(&out, path, "w")) {
 		return false;
 	}
 
-	fprintf(f, "boot=%s\nboot_file=%s\ntheme=%s\n", s->boot_enabled ? "on" : "off", s->boot_file,
-			theme_mode_key(s->theme));
-	bindings_write(&s->bindings, f);
-
-	bool ok = fclose(f) == 0 && rename(tmp, path) == 0;
-	if (!ok) {
-		remove(tmp);
-	}
-	return ok;
+	fprintf(out.file, "boot_rom=%s\nboot_rom_file=%s\ntheme=%s\n",
+			s->boot_rom_enabled ? "on" : "off", s->boot_rom_file, theme_mode_key(s->theme));
+	bindings_write(&s->bindings, out.file);
+	return atomic_file_commit(&out);
 }

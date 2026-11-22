@@ -22,6 +22,12 @@ enum {
 	OPT_CRASH_TEST,
 };
 
+/* Index = CrashTest value; CRASH_TEST_NONE has no name. */
+static const char *const CRASH_TEST_NAMES[CRASH_TEST_COUNT] = {
+	[CRASH_TEST_SEGV] = "segv",		  [CRASH_TEST_ABORT] = "abort", [CRASH_TEST_FPE] = "fpe",
+	[CRASH_TEST_ILLEGAL] = "illegal", [CRASH_TEST_HALT] = "halt",
+};
+
 static const char SHORT_OPTS[] = "r:s:vpVh";
 
 static const struct option LONG_OPTS[] = {
@@ -40,6 +46,10 @@ static const struct option LONG_OPTS[] = {
 	{NULL, 0, NULL, 0},
 };
 
+const char *cli_crash_test_name(CrashTest test) {
+	return (test > CRASH_TEST_NONE && test < CRASH_TEST_COUNT) ? CRASH_TEST_NAMES[test] : "none";
+}
+
 static void print_help(void) {
 	fputs("Usage: gboyc [OPTIONS] [ROM]\n"
 		  "\n"
@@ -50,9 +60,14 @@ static void print_help(void) {
 		  "\n"
 		  "Options:\n"
 		  "  -r, --rom PATH         Load this ROM at startup\n"
-		  "      --no-boot          Skip the boot animation for this run only\n"
+		  "      --no-boot          Skip the boot ROM for this run only\n"
 		  "      --boot-rom PATH    Use this boot ROM for this run only\n"
-		  "      --crash-test KIND  Run a crash test (segv, abort, fpe, illegal, halt)\n"
+		  "      --crash-test KIND  Run a crash test (",
+		  stdout);
+	for (int t = CRASH_TEST_NONE + 1; t < CRASH_TEST_COUNT; t++) {
+		printf("%s%s", t > CRASH_TEST_NONE + 1 ? ", " : "", CRASH_TEST_NAMES[t]);
+	}
+	fputs(")\n"
 		  "  -s, --scale N          Initial window size, 1-10 (default 4)\n"
 		  "      --mute             Disable audio\n"
 		  "      --paused           Start paused (needs a ROM)\n"
@@ -71,7 +86,7 @@ static void print_paths(void) {
 		printf("config: %s  (settings.cfg)\n", path);
 	}
 	if (paths_dir(PATHS_DATA, path, sizeof path)) {
-		printf("data:   %s  (boot/, saves/)\n", path);
+		printf("data:   %s  (boot/, states/)\n", path);
 	}
 }
 
@@ -92,15 +107,13 @@ static bool parse_number(const char *text, int min, int max, int *out) {
 	return true;
 }
 
-static bool valid_crash_test(const char *kind) {
-	static const char *const KINDS[] = {"segv", "abort", "fpe", "illegal", "halt"};
-
-	for (size_t i = 0; i < sizeof KINDS / sizeof *KINDS; i++) {
-		if (strcmp(kind, KINDS[i]) == 0) {
-			return true;
+static CrashTest parse_crash_test(const char *name) {
+	for (int t = CRASH_TEST_NONE + 1; t < CRASH_TEST_COUNT; t++) {
+		if (strcmp(name, CRASH_TEST_NAMES[t]) == 0) {
+			return (CrashTest)t;
 		}
 	}
-	return false;
+	return CRASH_TEST_NONE;
 }
 
 CliAction cli_parse(CliOptions *o, int argc, char **argv) {
@@ -134,15 +147,15 @@ CliAction cli_parse(CliOptions *o, int argc, char **argv) {
 			o->paused = true;
 			break;
 		case OPT_STATE:
-			if (!parse_number(optarg, SLOT_MIN, SLOT_MAX, &o->state)) {
+			if (!parse_number(optarg, SLOT_MIN, SLOT_MAX, &o->load_state_slot)) {
 				return fail("invalid state slot (expected 1-9)", optarg);
 			}
 			break;
 		case OPT_CRASH_TEST:
-			if (!valid_crash_test(optarg)) {
+			o->crash_test = parse_crash_test(optarg);
+			if (o->crash_test == CRASH_TEST_NONE) {
 				return fail("invalid crash test", optarg);
 			}
-			o->crash_test = optarg;
 			break;
 		case 'v':
 			o->verbose = true;
@@ -177,10 +190,10 @@ CliAction cli_parse(CliOptions *o, int argc, char **argv) {
 	if (o->no_boot && o->boot_rom) {
 		return fail("--no-boot and --boot-rom cannot be combined", NULL);
 	}
-	if ((o->paused || o->state) && !o->rom) {
+	if ((o->paused || o->load_state_slot) && !o->rom) {
 		return fail("--paused and --state need a ROM", NULL);
 	}
-	if (o->crash_test && !o->rom) {
+	if (o->crash_test != CRASH_TEST_NONE && !o->rom) {
 		return fail("--crash-test needs a ROM", NULL);
 	}
 	return CLI_RUN;

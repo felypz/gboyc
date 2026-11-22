@@ -9,8 +9,8 @@
 #define SETTINGS_NAME_MAX 64
 
 typedef struct {
-	bool boot_enabled;
-	char boot_file[SETTINGS_NAME_MAX];
+	bool boot_rom_enabled;
+	char boot_rom_file[SETTINGS_NAME_MAX];
 	ThemeMode theme;
 	Bindings bindings;
 } Settings;
