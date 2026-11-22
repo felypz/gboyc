@@ -12,7 +12,7 @@ void stepper_free(Stepper *s) {
 
 void stepper_discard(Stepper *s) {
 	s->pending = false;
-	s->cycles = 0;
+	s->mcycles = 0;
 }
 
 static bool snapshot_take(Stepper *s, const Gb *gb) {
@@ -37,26 +37,30 @@ static bool snapshot_take(Stepper *s, const Gb *gb) {
 
 static void snapshot_restore(const Stepper *s, Gb *gb) {
 	memcpy(gb, s->gb_snapshot, sizeof *gb);
-	cartridge_state_read(gb->cart, s->cart_snapshot, s->cart_size);
+	/* The snapshot was written by snapshot_take(), so it always passes validation. */
+	cartridge_state_restore(gb->cart, s->cart_snapshot, s->cart_size);
 }
 
-static bool run_limited(Gb *gb, unsigned limit) {
-	jmp_buf buf;
+/* Runs one instruction, stopping early after max_mcycles. Returns true if it completed. */
+static bool run_limited(Gb *gb, unsigned max_mcycles) {
+	/* Local on purpose: gb->step.escape is cleared on both exits, so it never dangles. */
+	jmp_buf escape;
 
-	gb->step.abort = &buf;
-	gb->step.limit = limit;
-	gb->step.count = 0;
+	gb->step.escape = &escape;
+	gb->step.max_mcycles = max_mcycles;
+	gb->step.mcycles_done = 0;
 
-	if (setjmp(buf)) {
-		gb->step.abort = NULL;
+	if (setjmp(escape)) {
+		gb->step.escape = NULL;
 		return false;
 	}
 
 	cpu_step(&gb->cpu);
-	gb->step.abort = NULL;
+	gb->step.escape = NULL;
 	return true;
 }
 
+/* Finishes a partially stepped instruction by replaying it from the snapshot, unbounded. */
 void stepper_commit(Stepper *s, Gb *gb) {
 	if (!s->pending) {
 		return;
@@ -67,10 +71,10 @@ void stepper_commit(Stepper *s, Gb *gb) {
 	stepper_discard(s);
 }
 
-void stepper_frame(Stepper *s, Gb *gb) {
+bool stepper_frame(Stepper *s, Gb *gb) {
 	stepper_commit(s, gb);
-	ppu_take_frame(&gb->ppu);
-	gb_run_frame(gb);
+	ppu_take_frame(&gb->ppu); /* drop a frame that was already completed before stepping */
+	return gb_run_frame(gb);
 }
 
 void stepper_instruction(Stepper *s, Gb *gb) {
@@ -81,26 +85,29 @@ void stepper_instruction(Stepper *s, Gb *gb) {
 	cpu_step(&gb->cpu);
 }
 
-void stepper_cycle(Stepper *s, Gb *gb) {
+/*
+ * Advances exactly one more M-cycle into the current instruction. Each call
+ * rolls back to the snapshot and replays one M-cycle further than the last.
+ */
+void stepper_mcycle(Stepper *s, Gb *gb) {
 	if (!s->pending) {
 		if (!snapshot_take(s, gb)) {
 			return;
 		}
 		s->pending = true;
-		s->cycles = 0;
+		s->mcycles = 0;
 	} else {
 		snapshot_restore(s, gb);
 	}
 
-	gb->serial.quiet = true;
-	bool done = run_limited(gb, s->cycles + 1);
-	gb->serial.quiet = false;
+	/* The instruction is replayed many times; print serial output only once, at commit. */
+	gb->serial.suppress_output = true;
+	bool completed = run_limited(gb, s->mcycles + 1);
+	gb->serial.suppress_output = false;
 
-	if (done) {
-		snapshot_restore(s, gb);
-		cpu_step(&gb->cpu);
-		stepper_discard(s);
+	if (completed) {
+		stepper_commit(s, gb);
 	} else {
-		s->cycles++;
+		s->mcycles++;
 	}
 }
