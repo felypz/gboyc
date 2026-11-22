@@ -10,6 +10,13 @@
 #define PPU_IRQ_VBLANK 0x01
 #define PPU_IRQ_STAT   0x02
 
+typedef enum {
+	PPU_MODE_HBLANK = 0,
+	PPU_MODE_VBLANK = 1,
+	PPU_MODE_OAM_SCAN = 2,
+	PPU_MODE_DRAWING = 3,
+} PpuMode;
+
 typedef struct {
 	uint8_t vram[0x2000];
 	uint8_t oam[0xA0];
@@ -24,7 +31,7 @@ typedef struct {
 	uint8_t obp1;
 	uint8_t wy;
 	uint8_t wx;
-	uint8_t mode;
+	uint8_t mode; /* PpuMode */
 	uint8_t window_line;
 	uint16_t dot;
 	uint32_t off_dots;
@@ -53,15 +60,20 @@ typedef enum {
 
 void ppu_oam_bug(Ppu *p, OamBug kind);
 
-void ppu_reset(Ppu *p);
-unsigned ppu_step(Ppu *p, int cycles);
+void ppu_reset(Ppu *p, bool has_boot_rom);
+/* Advances one M-cycle (4 dots). Returns a mask of PPU_IRQ_* raised during it. */
+unsigned ppu_mcycle(Ppu *p);
 bool ppu_take_frame(Ppu *p);
+bool ppu_state_sane(const Ppu *p);
 
+/* LCD registers (full bus address). */
 uint8_t ppu_read(const Ppu *p, uint16_t addr);
+/* Returns a mask of PPU_IRQ_* raised by the write. */
 unsigned ppu_write(Ppu *p, uint16_t addr, uint8_t value);
 
-uint8_t ppu_read_vram(const Ppu *p, uint16_t addr);
-void ppu_write_vram(Ppu *p, uint16_t addr, uint8_t value);
+/* Memory access; offsets are relative to the start of VRAM / OAM. */
+uint8_t ppu_read_vram(const Ppu *p, uint16_t offset);
+void ppu_write_vram(Ppu *p, uint16_t offset, uint8_t value);
 uint8_t ppu_read_oam(const Ppu *p, uint16_t offset);
 void ppu_write_oam(Ppu *p, uint16_t offset, uint8_t value);
 
