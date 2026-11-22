@@ -8,6 +8,17 @@
 #define APU_SAMPLE_RATE	  48000
 #define APU_BUFFER_FRAMES 4096
 
+/* Registers NR10..NR51 are stored in Apu.reg, indexed from REG_NR10. */
+#define APU_REG_COUNT 0x17
+
+typedef enum {
+	CH_PULSE1,
+	CH_PULSE2,
+	CH_WAVE,
+	CH_NOISE,
+	CH_COUNT,
+} ApuChannelId;
+
 typedef struct {
 	bool on;
 	bool dac;
@@ -24,8 +35,8 @@ typedef struct {
 } ApuChannel;
 
 typedef struct {
-	ApuChannel ch[4];
-	uint8_t reg[0x17];
+	ApuChannel ch[CH_COUNT];
+	uint8_t reg[APU_REG_COUNT];
 	uint8_t wave[16];
 	bool power;
 	uint8_t fs_step;
@@ -45,10 +56,12 @@ typedef struct {
 	float samples[APU_BUFFER_FRAMES * 2];
 } Apu;
 
-void apu_reset(Apu *a, bool boot);
+void apu_reset(Apu *a, bool has_boot_rom);
 void apu_step(Apu *a, int cycles);
 uint8_t apu_read(const Apu *a, uint16_t addr);
 void apu_write(Apu *a, uint16_t addr, uint8_t value);
 size_t apu_take_samples(Apu *a, const float **out);
+/* Range checks used to validate a loaded savestate. */
+bool apu_state_sane(const Apu *a);
 
 #endif
