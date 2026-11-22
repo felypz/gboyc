@@ -2,48 +2,49 @@
 
 #include <string.h>
 
-#define ADDR_IF	  0xFF0F
-#define OAM_BYTES 160
+/* Cap on cpu_step() calls per frame. A frame is 17556 M-cycles and every step takes at least one.
+ */
+#define MAX_STEPS_PER_FRAME 60000
 
+/* Offset between the echo region and the WRAM it mirrors. */
+#define ECHO_OFFSET (MEM_ECHO_START - MEM_WRAM_START)
+
+/* I/O register values after the boot ROM, for registers stored in gb->io. */
 static const struct {
-	uint8_t reg;
+	uint16_t reg;
 	uint8_t value;
-} IO_DEFAULTS[] = {
-	{0x0F, 0xE1},
-	{0x46, 0xFF},
+} POST_BOOT_IO[] = {
+	{REG_IF, 0xE1},
+	{REG_DMA, 0xFF},
 };
 
-void gb_init(Gb *gb, Cartridge *cart, const uint8_t *boot) {
-	bool has_boot = boot != NULL;
+void gb_init(Gb *gb, Cartridge *cart, const uint8_t *boot_rom) {
+	bool has_boot_rom = boot_rom != NULL;
 
 	memset(gb, 0, sizeof *gb);
 	gb->cart = cart;
-	if (has_boot) {
-		memcpy(gb->boot_rom, boot, BOOT_ROM_SIZE);
-		gb->boot_on = true;
+	if (has_boot_rom) {
+		memcpy(gb->boot_rom, boot_rom, BOOT_ROM_SIZE);
+		gb->boot_rom_mapped = true;
 	}
 
-	timer_reset(&gb->timer);
+	timer_reset(&gb->timer, has_boot_rom);
 	joypad_reset(&gb->joypad);
 	serial_reset(&gb->serial);
-	ppu_reset(&gb->ppu);
-	apu_reset(&gb->apu, has_boot);
-	cpu_reset(&gb->cpu, gb, has_boot);
+	ppu_reset(&gb->ppu, has_boot_rom);
+	apu_reset(&gb->apu, has_boot_rom);
+	cpu_reset(&gb->cpu, gb, has_boot_rom);
 
-	if (has_boot) {
-		gb->timer.div = 0;
-		gb->ppu.lcdc = 0;
-		gb->ppu.bgp = 0;
+	if (has_boot_rom) {
 		return;
 	}
-
-	for (size_t i = 0; i < sizeof IO_DEFAULTS / sizeof *IO_DEFAULTS; i++) {
-		gb->io[IO_DEFAULTS[i].reg] = IO_DEFAULTS[i].value;
+	for (size_t i = 0; i < sizeof POST_BOOT_IO / sizeof *POST_BOOT_IO; i++) {
+		gb->io[POST_BOOT_IO[i].reg - MEM_IO_START] = POST_BOOT_IO[i].value;
 	}
 }
 
 void gb_request_irq(Gb *gb, unsigned irq) {
-	gb->io[ADDR_IF - 0xFF00] |= (uint8_t)(1u << irq);
+	gb->io[REG_IF - MEM_IO_START] |= (uint8_t)(1u << irq);
 }
 
 void gb_request_ppu_irqs(Gb *gb, unsigned mask) {
@@ -59,23 +60,24 @@ void gb_dma_start(Gb *gb, uint8_t value) {
 	gb->dma = (Dma){.active = true, .delay = 2, .pos = 0, .src = (uint16_t)(value << 8)};
 }
 
+/* DMA reads the source directly, bypassing the bus (and its DMA lockout). */
 static uint8_t dma_read(const Gb *gb, uint16_t addr) {
-	if (addr >= 0xE000) {
-		addr -= 0x2000;
+	if (addr >= MEM_ECHO_START) {
+		addr -= ECHO_OFFSET;
 	}
-	if (addr < 0x8000) {
+	if (addr <= MEM_ROM_END) {
 		return cartridge_read_rom(gb->cart, addr);
 	}
-	if (addr < 0xA000) {
-		return gb->ppu.vram[addr & 0x1FFF];
+	if (addr <= MEM_VRAM_END) {
+		return gb->ppu.vram[addr - MEM_VRAM_START];
 	}
-	if (addr < 0xC000) {
+	if (addr <= MEM_EXT_RAM_END) {
 		return cartridge_read_ram(gb->cart, addr);
 	}
-	return gb->wram[addr & 0x1FFF];
+	return gb->wram[addr - MEM_WRAM_START];
 }
 
-static void dma_tick(Gb *gb) {
+static void dma_mcycle(Gb *gb) {
 	Dma *d = &gb->dma;
 
 	if (!d->active) {
@@ -87,26 +89,30 @@ static void dma_tick(Gb *gb) {
 	}
 
 	gb->ppu.oam[d->pos] = dma_read(gb, (uint16_t)(d->src + d->pos));
-	if (++d->pos == OAM_BYTES) {
+	if (++d->pos == MEM_OAM_SIZE) {
 		d->active = false;
 	}
 }
 
-void gb_tick(Gb *gb) {
+/* Called by the CPU at the start of every M-cycle, before its bus access. */
+void gb_mcycle_begin(Gb *gb) {
+	if (gb->step.escape && gb->step.mcycles_done++ == gb->step.max_mcycles) {
+		longjmp(*gb->step.escape, 1);
+	}
+}
+
+/* Advances every peripheral by one M-cycle, after the CPU's bus access. */
+void gb_mcycle_end(Gb *gb) {
 	if (timer_step(&gb->timer)) {
 		gb_request_irq(gb, IRQ_TIMER);
 	}
 	if (serial_step(&gb->serial)) {
 		gb_request_irq(gb, IRQ_SERIAL);
 	}
-	gb_request_ppu_irqs(gb, ppu_step(&gb->ppu, 4));
-	apu_step(&gb->apu, 4);
-	dma_tick(gb);
+	gb_request_ppu_irqs(gb, ppu_mcycle(&gb->ppu));
+	apu_step(&gb->apu, GB_DOTS_PER_MCYCLE);
+	dma_mcycle(gb);
 }
-
-#define MAX_STEPS_PER_FRAME 60000
-#define APU_TIMER_MIN		(-16)
-#define APU_TIMER_MAX		4200000
 
 bool gb_run_frame(Gb *gb) {
 	for (unsigned i = 0; i < MAX_STEPS_PER_FRAME; i++) {
@@ -118,39 +124,11 @@ bool gb_run_frame(Gb *gb) {
 	return false;
 }
 
-static bool ppu_sane(const Ppu *p) {
-	if (p->mode > 3 || p->ly >= 154 || p->dot >= 456 || p->lcd_x > PPU_W || p->sprite_count > 10 ||
-		p->sprite_next > p->sprite_count) {
-		return false;
-	}
-	for (unsigned i = 0; i < p->sprite_count; i++) {
-		if (p->sprites[i] >= 40) {
-			return false;
-		}
-	}
-	return true;
-}
-
-static bool apu_sane(const Apu *a) {
-	if (a->fs_step >= 8 || a->sample_count > APU_BUFFER_FRAMES) {
-		return false;
-	}
-	for (unsigned i = 0; i < 4; i++) {
-		const ApuChannel *c = &a->ch[i];
-
-		if (c->duty > 3 || c->pos >= (i == 2 ? 32u : 8u) || c->freq > 2047 || c->length > 256 ||
-			c->timer < APU_TIMER_MIN || c->timer > APU_TIMER_MAX) {
-			return false;
-		}
-	}
-	return true;
-}
-
 bool gb_state_sane(const Gb *gb) {
 	const Dma *d = &gb->dma;
 
-	return ppu_sane(&gb->ppu) && apu_sane(&gb->apu) && (!d->active || d->pos < 160) &&
-		   d->delay <= 2 && gb->timer.reload <= 2 && gb->serial.bits <= 8 &&
+	return ppu_state_sane(&gb->ppu) && apu_state_sane(&gb->apu) && timer_state_sane(&gb->timer) &&
+		   (!d->active || d->pos < MEM_OAM_SIZE) && d->delay <= 2 && gb->serial.bits <= 8 &&
 		   gb->cpu.trace_pos < CPU_TRACE;
 }
 
@@ -166,10 +144,4 @@ const uint32_t *gb_framebuffer(const Gb *gb) {
 
 size_t gb_take_audio(Gb *gb, const float **samples) {
 	return apu_take_samples(&gb->apu, samples);
-}
-
-void gb_cycle_begin(Gb *gb) {
-	if (gb->step.abort && gb->step.count++ == gb->step.limit) {
-		longjmp(*gb->step.abort, 1);
-	}
 }

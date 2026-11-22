@@ -1,64 +1,64 @@
 #include "timer.h"
 
-#define ADDR_DIV  0xFF04
-#define ADDR_TIMA 0xFF05
-#define ADDR_TMA  0xFF06
-#define ADDR_TAC  0xFF07
+#include "memmap.h"
 
-enum {
-	RELOAD_NONE,
-	RELOAD_PENDING,
-	RELOAD_DONE,
-};
+#define TAC_ENABLE 0x04
+#define TAC_MASK   0x07
 
-static const uint8_t TAC_BIT[4] = {9, 3, 5, 7};
+/* DIV bit that clocks TIMA for each TAC frequency select (4096/262144/65536/16384 Hz). */
+static const uint8_t TAC_DIV_BIT[4] = {9, 3, 5, 7};
 
-static bool signal(const Timer *t) {
-	return (t->tac & 4) && ((t->div >> TAC_BIT[t->tac & 3]) & 1);
+/* TIMA increments on the falling edge of this signal. */
+static bool selected_bit_high(const Timer *t) {
+	return (t->tac & TAC_ENABLE) && ((t->div >> TAC_DIV_BIT[t->tac & 3]) & 1);
 }
 
-static void increment(Timer *t) {
+static void increment_tima(Timer *t) {
 	if (++t->tima == 0) {
-		t->reload = RELOAD_PENDING;
+		t->reload = TIMER_RELOAD_PENDING;
 	}
 }
 
-static void update(Timer *t, uint16_t div, uint8_t tac) {
-	bool before = signal(t);
+/* DIV and TAC writes can both cause a falling edge, so they share one path. */
+static void timer_set_div_tac(Timer *t, uint16_t div, uint8_t tac) {
+	bool before = selected_bit_high(t);
 
 	t->div = div;
 	t->tac = tac;
-	if (before && !signal(t)) {
-		increment(t);
+	if (before && !selected_bit_high(t)) {
+		increment_tima(t);
 	}
 }
 
-void timer_reset(Timer *t) {
-	*t = (Timer){.div = 0xABCC};
+void timer_reset(Timer *t, bool has_boot_rom) {
+	*t = (Timer){0};
+	if (!has_boot_rom) {
+		t->div = 0xABCC; /* value after the DMG boot ROM */
+	}
 }
 
 bool timer_step(Timer *t) {
 	bool irq = false;
 
-	if (t->reload == RELOAD_PENDING) {
+	if (t->reload == TIMER_RELOAD_PENDING) {
 		t->tima = t->tma;
-		t->reload = RELOAD_DONE;
+		t->reload = TIMER_RELOAD_DONE;
 		irq = true;
 	} else {
-		t->reload = RELOAD_NONE;
+		t->reload = TIMER_RELOAD_IDLE;
 	}
 
-	update(t, (uint16_t)(t->div + 4), t->tac);
+	timer_set_div_tac(t, (uint16_t)(t->div + 4), t->tac);
 	return irq;
 }
 
 uint8_t timer_read(const Timer *t, uint16_t addr) {
 	switch (addr) {
-	case ADDR_DIV:
+	case REG_DIV:
 		return t->div >> 8;
-	case ADDR_TIMA:
+	case REG_TIMA:
 		return t->tima;
-	case ADDR_TMA:
+	case REG_TMA:
 		return t->tma;
 	default:
 		return t->tac | 0xF8;
@@ -67,23 +67,27 @@ uint8_t timer_read(const Timer *t, uint16_t addr) {
 
 void timer_write(Timer *t, uint16_t addr, uint8_t value) {
 	switch (addr) {
-	case ADDR_DIV:
-		update(t, 0, t->tac);
+	case REG_DIV:
+		timer_set_div_tac(t, 0, t->tac);
 		break;
-	case ADDR_TIMA:
-		if (t->reload != RELOAD_DONE) {
+	case REG_TIMA:
+		if (t->reload != TIMER_RELOAD_DONE) {
 			t->tima = value;
-			t->reload = RELOAD_NONE;
+			t->reload = TIMER_RELOAD_IDLE;
 		}
 		break;
-	case ADDR_TMA:
+	case REG_TMA:
 		t->tma = value;
-		if (t->reload == RELOAD_DONE) {
+		if (t->reload == TIMER_RELOAD_DONE) {
 			t->tima = value;
 		}
 		break;
 	default:
-		update(t, t->div, value & 7);
+		timer_set_div_tac(t, t->div, value & TAC_MASK);
 		break;
 	}
+}
+
+bool timer_state_sane(const Timer *t) {
+	return t->reload <= TIMER_RELOAD_DONE && (t->tac & ~TAC_MASK) == 0;
 }

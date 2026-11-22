@@ -1,39 +1,43 @@
 #include "bus.h"
 
-#define ADDR_JOYP 0xFF00
-#define ADDR_SB	  0xFF01
-#define ADDR_SC	  0xFF02
-#define ADDR_IF	  0xFF0F
-#define ADDR_DMA  0xFF46
-#define ADDR_BOOT 0xFF50
-
 static bool is_ppu_reg(uint16_t addr) {
-	return addr >= 0xFF40 && addr <= 0xFF4B && addr != ADDR_DMA;
+	return addr >= REG_LCDC && addr <= REG_WX && addr != REG_DMA;
 }
 
 static bool is_apu_reg(uint16_t addr) {
-	return addr >= 0xFF10 && addr <= 0xFF3F;
+	return addr >= REG_NR10 && addr <= REG_WAVE_END;
 }
 
 static bool is_serial_reg(uint16_t addr) {
-	return addr == ADDR_SB || addr == ADDR_SC;
+	return addr == REG_SB || addr == REG_SC;
 }
 
+static bool is_timer_reg(uint16_t addr) {
+	return addr >= REG_DIV && addr <= REG_TAC;
+}
+
+/* During OAM DMA the CPU can only reach HRAM and the I/O page. */
 static bool dma_blocks(const Gb *gb, uint16_t addr) {
-	return gb->dma.active && gb->dma.delay == 0 && addr < 0xFF00;
+	return gb->dma.active && gb->dma.delay == 0 && addr < MEM_IO_START;
 }
 
+/* WRAM and its echo are both 8 KiB-aligned mirrors, so masking maps either to WRAM. */
+static uint16_t wram_index(uint16_t addr) {
+	return addr & (MEM_WRAM_SIZE - 1);
+}
+
+/* Registers without a dedicated module are plain storage in gb->io. */
 static uint8_t io_read(const Gb *gb, uint16_t addr) {
-	if (addr == ADDR_BOOT) {
+	if (addr == REG_BOOT) {
 		return 0xFF;
 	}
-	if (addr == ADDR_JOYP) {
+	if (addr == REG_JOYP) {
 		return joypad_read(&gb->joypad);
 	}
 	if (is_serial_reg(addr)) {
 		return serial_read(&gb->serial, addr);
 	}
-	if (addr >= 0xFF04 && addr <= 0xFF07) {
+	if (is_timer_reg(addr)) {
 		return timer_read(&gb->timer, addr);
 	}
 	if (is_apu_reg(addr)) {
@@ -42,14 +46,14 @@ static uint8_t io_read(const Gb *gb, uint16_t addr) {
 	if (is_ppu_reg(addr)) {
 		return ppu_read(&gb->ppu, addr);
 	}
-	if (addr == ADDR_IF) {
-		return gb->io[addr - 0xFF00] | 0xE0;
+	if (addr == REG_IF) {
+		return gb->io[addr - MEM_IO_START] | ~IRQ_MASK;
 	}
-	return gb->io[addr - 0xFF00];
+	return gb->io[addr - MEM_IO_START];
 }
 
 static void io_write(Gb *gb, uint16_t addr, uint8_t value) {
-	if (addr == ADDR_JOYP) {
+	if (addr == REG_JOYP) {
 		if (joypad_write(&gb->joypad, value)) {
 			gb_request_irq(gb, IRQ_JOYPAD);
 		}
@@ -59,7 +63,7 @@ static void io_write(Gb *gb, uint16_t addr, uint8_t value) {
 		serial_write(&gb->serial, addr, value);
 		return;
 	}
-	if (addr >= 0xFF04 && addr <= 0xFF07) {
+	if (is_timer_reg(addr)) {
 		timer_write(&gb->timer, addr, value);
 		return;
 	}
@@ -71,48 +75,48 @@ static void io_write(Gb *gb, uint16_t addr, uint8_t value) {
 		gb_request_ppu_irqs(gb, ppu_write(&gb->ppu, addr, value));
 		return;
 	}
-	if (addr == ADDR_BOOT) {
+	if (addr == REG_BOOT) {
 		if (value) {
-			gb->boot_on = false;
+			gb->boot_rom_mapped = false;
 		}
 		return;
 	}
-	if (addr == ADDR_DMA) {
+	if (addr == REG_DMA) {
 		gb_dma_start(gb, value);
 	}
-	gb->io[addr - 0xFF00] = value;
+	gb->io[addr - MEM_IO_START] = value;
 }
 
 uint8_t bus_read(const Gb *gb, uint16_t addr) {
 	if (dma_blocks(gb, addr)) {
 		return 0xFF;
 	}
-	if (gb->boot_on && addr < BOOT_ROM_SIZE) {
+	if (gb->boot_rom_mapped && addr < BOOT_ROM_SIZE) {
 		return gb->boot_rom[addr];
 	}
-	if (addr < 0x8000) {
+	if (addr <= MEM_ROM_END) {
 		return cartridge_read_rom(gb->cart, addr);
 	}
-	if (addr < 0xA000) {
-		return ppu_read_vram(&gb->ppu, addr);
+	if (addr <= MEM_VRAM_END) {
+		return ppu_read_vram(&gb->ppu, addr - MEM_VRAM_START);
 	}
-	if (addr < 0xC000) {
+	if (addr <= MEM_EXT_RAM_END) {
 		return cartridge_read_ram(gb->cart, addr);
 	}
-	if (addr < 0xFE00) {
-		return gb->wram[addr & 0x1FFF];
+	if (addr <= MEM_ECHO_END) {
+		return gb->wram[wram_index(addr)];
 	}
-	if (addr < 0xFEA0) {
-		return ppu_read_oam(&gb->ppu, addr - 0xFE00);
+	if (addr <= MEM_OAM_END) {
+		return ppu_read_oam(&gb->ppu, addr - MEM_OAM_START);
 	}
-	if (addr < 0xFF00) {
+	if (addr <= MEM_UNUSABLE_END) {
 		return 0xFF;
 	}
-	if (addr < 0xFF80) {
+	if (addr <= MEM_IO_END) {
 		return io_read(gb, addr);
 	}
-	if (addr < 0xFFFF) {
-		return gb->hram[addr - 0xFF80];
+	if (addr <= MEM_HRAM_END) {
+		return gb->hram[addr - MEM_HRAM_START];
 	}
 	return gb->ie;
 }
@@ -121,21 +125,23 @@ void bus_write(Gb *gb, uint16_t addr, uint8_t value) {
 	if (dma_blocks(gb, addr)) {
 		return;
 	}
-	if (addr < 0x8000) {
+	if (addr <= MEM_ROM_END) {
 		cartridge_write_rom(gb->cart, addr, value);
-	} else if (addr < 0xA000) {
-		ppu_write_vram(&gb->ppu, addr, value);
-	} else if (addr < 0xC000) {
+	} else if (addr <= MEM_VRAM_END) {
+		ppu_write_vram(&gb->ppu, addr - MEM_VRAM_START, value);
+	} else if (addr <= MEM_EXT_RAM_END) {
 		cartridge_write_ram(gb->cart, addr, value);
-	} else if (addr < 0xFE00) {
-		gb->wram[addr & 0x1FFF] = value;
-	} else if (addr < 0xFEA0) {
-		ppu_write_oam(&gb->ppu, addr - 0xFE00, value);
-	} else if (addr >= 0xFFFF) {
-		gb->ie = value;
-	} else if (addr >= 0xFF80) {
-		gb->hram[addr - 0xFF80] = value;
-	} else if (addr >= 0xFF00) {
+	} else if (addr <= MEM_ECHO_END) {
+		gb->wram[wram_index(addr)] = value;
+	} else if (addr <= MEM_OAM_END) {
+		ppu_write_oam(&gb->ppu, addr - MEM_OAM_START, value);
+	} else if (addr <= MEM_UNUSABLE_END) {
+		/* writes are ignored */
+	} else if (addr <= MEM_IO_END) {
 		io_write(gb, addr, value);
+	} else if (addr <= MEM_HRAM_END) {
+		gb->hram[addr - MEM_HRAM_START] = value;
+	} else {
+		gb->ie = value;
 	}
 }
