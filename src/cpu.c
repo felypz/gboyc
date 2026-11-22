@@ -4,14 +4,22 @@
 
 #include "bus.h"
 
-#define FLAG_Z 0x80
-#define FLAG_N 0x40
-#define FLAG_H 0x20
-#define FLAG_C 0x10
+#define FLAG_Z	   0x80
+#define FLAG_N	   0x40
+#define FLAG_H	   0x20
+#define FLAG_C	   0x10
+#define FLAGS_MASK 0xF0 /* the low nibble of F is hard-wired to zero */
 
-#define ADDR_IF	 0xFF0F
-#define ADDR_IE	 0xFFFF
-#define IRQ_MASK 0x1F
+#define OPERAND_HL_MEM	6 /* register index 6 means "(HL)", not a register */
+#define LDH_BASE		MEM_IO_START
+#define IRQ_VECTOR_BASE 0x40
+#define IRQ_VECTOR_STEP 8
+
+/*
+ * Opcodes are decoded as op = xx yyy zzz:
+ *   x = op >> 6, y = (op >> 3) & 7, z = op & 7,
+ *   p = y >> 1, q = y & 1 (register pair / direction selectors).
+ */
 
 typedef enum {
 	ALU_ADD,
@@ -25,29 +33,46 @@ typedef enum {
 } AluOp;
 
 typedef enum {
+	SHIFT_RLC,
+	SHIFT_RRC,
+	SHIFT_RL,
+	SHIFT_RR,
+	SHIFT_SLA,
+	SHIFT_SRA,
+	SHIFT_SWAP,
+	SHIFT_SRL,
+} ShiftOp;
+
+typedef enum {
 	ACC_NONE,
 	ACC_READ,
 	ACC_WRITE,
 } Access;
 
-static void exec(Cpu *cpu);
-static void exec_x0(Cpu *cpu, unsigned y, unsigned z);
-static void exec_x3(Cpu *cpu, unsigned y, unsigned z);
-static void exec_cb(Cpu *cpu);
-
 static uint8_t flags(bool z, bool n, bool h, bool cy) {
 	return (z ? FLAG_Z : 0) | (n ? FLAG_N : 0) | (h ? FLAG_H : 0) | (cy ? FLAG_C : 0);
 }
 
-static void tick(Cpu *cpu) {
-	gb_cycle_begin(cpu->gb);
-	gb_tick(cpu->gb);
+static uint8_t pending_irqs(const Cpu *cpu) {
+	return bus_read(cpu->gb, REG_IE) & bus_read(cpu->gb, REG_IF) & IRQ_MASK;
+}
+
+/* -- M-cycle primitives -- */
+
+/* An M-cycle without a bus access. */
+static void idle_mcycle(Cpu *cpu) {
+	gb_mcycle_begin(cpu->gb);
+	gb_mcycle_end(cpu->gb);
 }
 
 static bool in_oam(uint16_t addr) {
-	return (addr >> 8) == 0xFE;
+	return (addr >> 8) == (MEM_OAM_START >> 8);
 }
 
+/*
+ * DMG OAM corruption bug: touching OAM (or putting an OAM address on the
+ * address bus through the inc/dec unit) while the PPU scans it glitches OAM.
+ */
 static void oam_bug(Cpu *cpu, Access acc, uint16_t addr, bool idu, uint16_t idu_addr) {
 	bool hit = acc != ACC_NONE && in_oam(addr);
 	bool glitch = idu && in_oam(idu_addr);
@@ -63,14 +88,14 @@ static uint8_t mcycle(Cpu *cpu, Access acc, uint16_t addr, uint8_t value, bool i
 					  uint16_t idu_addr) {
 	uint8_t result = 0;
 
-	gb_cycle_begin(cpu->gb);
+	gb_mcycle_begin(cpu->gb);
 	oam_bug(cpu, acc, addr, idu, idu_addr);
 	if (acc == ACC_READ) {
 		result = bus_read(cpu->gb, addr);
 	} else if (acc == ACC_WRITE) {
 		bus_write(cpu->gb, addr, value);
 	}
-	gb_tick(cpu->gb);
+	gb_mcycle_end(cpu->gb);
 	return result;
 }
 
@@ -82,6 +107,7 @@ static void wr(Cpu *cpu, uint16_t addr, uint8_t value) {
 	mcycle(cpu, ACC_WRITE, addr, value, false, 0);
 }
 
+/* Same as rd/wr, but the inc/dec unit also drives the same address. */
 static uint8_t rd_idu(Cpu *cpu, uint16_t addr) {
 	return mcycle(cpu, ACC_READ, addr, 0, true, addr);
 }
@@ -90,14 +116,18 @@ static void wr_idu(Cpu *cpu, uint16_t addr, uint8_t value) {
 	mcycle(cpu, ACC_WRITE, addr, value, true, addr);
 }
 
-static void idu_tick(Cpu *cpu, uint16_t value) {
+/* An M-cycle that only runs the inc/dec unit on `value` (e.g. INC rr, PUSH). */
+static void idu_mcycle(Cpu *cpu, uint16_t value) {
 	mcycle(cpu, ACC_NONE, 0, 0, true, value);
 }
+
+/* -- operand access -- */
 
 static uint8_t fetch8(Cpu *cpu) {
 	uint8_t value;
 
 	if (cpu->halt_bug) {
+		/* HALT bug: the byte after HALT is read twice because PC doesn't advance. */
 		value = rd(cpu, cpu->pc);
 		cpu->halt_bug = false;
 	} else {
@@ -114,7 +144,7 @@ static uint16_t fetch16(Cpu *cpu) {
 }
 
 static void push16(Cpu *cpu, uint16_t value) {
-	idu_tick(cpu, cpu->sp);
+	idu_mcycle(cpu, cpu->sp);
 	cpu->sp--;
 	wr_idu(cpu, cpu->sp, value >> 8);
 	cpu->sp--;
@@ -129,32 +159,65 @@ static uint16_t pop16(Cpu *cpu) {
 	return (uint16_t)((hi << 8) | lo);
 }
 
-static uint8_t *r8_ptr(Cpu *cpu, unsigned i) {
-	uint8_t *table[8] = {&cpu->b, &cpu->c, &cpu->d, &cpu->e, &cpu->h, &cpu->l, NULL, &cpu->a};
-	return table[i];
-}
-
-static uint8_t get8(Cpu *cpu, unsigned i) {
-	return i == 6 ? rd(cpu, cpu->hl) : *r8_ptr(cpu, i);
-}
-
-static void set8(Cpu *cpu, unsigned i, uint8_t value) {
-	if (i == 6) {
-		wr(cpu, cpu->hl, value);
-	} else {
-		*r8_ptr(cpu, i) = value;
+/* 8-bit register by opcode index: B C D E H L (HL) A. Index 6 has no register. */
+static uint8_t *reg8(Cpu *cpu, unsigned i) {
+	switch (i) {
+	case 0:
+		return &cpu->b;
+	case 1:
+		return &cpu->c;
+	case 2:
+		return &cpu->d;
+	case 3:
+		return &cpu->e;
+	case 4:
+		return &cpu->h;
+	case 5:
+		return &cpu->l;
+	case 7:
+		return &cpu->a;
+	default:
+		return NULL;
 	}
 }
 
-static uint16_t *rp(Cpu *cpu, unsigned p) {
-	uint16_t *table[4] = {&cpu->bc, &cpu->de, &cpu->hl, &cpu->sp};
-	return table[p];
+static uint8_t get8(Cpu *cpu, unsigned i) {
+	return i == OPERAND_HL_MEM ? rd(cpu, cpu->hl) : *reg8(cpu, i);
+}
+
+static void set8(Cpu *cpu, unsigned i, uint8_t value) {
+	if (i == OPERAND_HL_MEM) {
+		wr(cpu, cpu->hl, value);
+	} else {
+		*reg8(cpu, i) = value;
+	}
+}
+
+/* 16-bit register pair table used by most opcodes: BC DE HL SP. */
+static uint16_t *reg16(Cpu *cpu, unsigned p) {
+	switch (p) {
+	case 0:
+		return &cpu->bc;
+	case 1:
+		return &cpu->de;
+	case 2:
+		return &cpu->hl;
+	default:
+		return &cpu->sp;
+	}
+}
+
+/* 16-bit register pair table used by PUSH/POP: BC DE HL AF. */
+static uint16_t *reg16_stack(Cpu *cpu, unsigned p) {
+	return p == 3 ? &cpu->af : reg16(cpu, p);
 }
 
 static bool cond(const Cpu *cpu, unsigned cc) {
 	bool set = cpu->f & (cc < 2 ? FLAG_Z : FLAG_C);
 	return (cc & 1) ? set : !set;
 }
+
+/* -- ALU -- */
 
 static uint8_t add8(Cpu *cpu, uint8_t v, unsigned carry) {
 	unsigned r = cpu->a + v + carry;
@@ -219,9 +282,10 @@ static void add_hl(Cpu *cpu, uint16_t v) {
 	bool half = ((cpu->hl & 0xFFF) + (v & 0xFFF)) > 0xFFF;
 	cpu->f = (cpu->f & FLAG_Z) | flags(false, false, half, r > 0xFFFF);
 	cpu->hl = (uint16_t)r;
-	tick(cpu);
+	idle_mcycle(cpu);
 }
 
+/* SP + signed immediate, shared by ADD SP,e8 and LD HL,SP+e8. Sets the flags. */
 static uint16_t sp_plus_e8(Cpu *cpu) {
 	uint8_t e = fetch8(cpu);
 	bool half = ((cpu->sp & 0xF) + (e & 0xF)) > 0xF;
@@ -230,41 +294,41 @@ static uint16_t sp_plus_e8(Cpu *cpu) {
 	return (uint16_t)(cpu->sp + (int8_t)e);
 }
 
-static uint8_t shift(Cpu *cpu, unsigned op, uint8_t v) {
+static uint8_t shift(Cpu *cpu, ShiftOp op, uint8_t v) {
 	unsigned old = (cpu->f & FLAG_C) ? 1 : 0;
 	uint8_t r;
 	bool cy;
 
 	switch (op) {
-	case 0:
+	case SHIFT_RLC:
 		cy = v >> 7;
 		r = (uint8_t)((v << 1) | cy);
 		break;
-	case 1:
+	case SHIFT_RRC:
 		cy = v & 1;
 		r = (uint8_t)((v >> 1) | (cy << 7));
 		break;
-	case 2:
+	case SHIFT_RL:
 		cy = v >> 7;
 		r = (uint8_t)((v << 1) | old);
 		break;
-	case 3:
+	case SHIFT_RR:
 		cy = v & 1;
 		r = (uint8_t)((v >> 1) | (old << 7));
 		break;
-	case 4:
+	case SHIFT_SLA:
 		cy = v >> 7;
 		r = (uint8_t)(v << 1);
 		break;
-	case 5:
+	case SHIFT_SRA:
 		cy = v & 1;
 		r = (uint8_t)((v >> 1) | (v & 0x80));
 		break;
-	case 6:
+	case SHIFT_SWAP:
 		cy = false;
 		r = (uint8_t)((v << 4) | (v >> 4));
 		break;
-	default:
+	default: /* SHIFT_SRL */
 		cy = v & 1;
 		r = v >> 1;
 		break;
@@ -300,10 +364,12 @@ static void daa(Cpu *cpu) {
 	cpu->f = (cpu->f & FLAG_N) | flags(cpu->a == 0, false, false, cy);
 }
 
+/* -- control flow -- */
+
 static void jr(Cpu *cpu, bool take) {
 	int8_t e = (int8_t)fetch8(cpu);
 	if (take) {
-		tick(cpu);
+		idle_mcycle(cpu);
 		cpu->pc = (uint16_t)(cpu->pc + e);
 	}
 }
@@ -311,7 +377,7 @@ static void jr(Cpu *cpu, bool take) {
 static void jp(Cpu *cpu, bool take) {
 	uint16_t addr = fetch16(cpu);
 	if (take) {
-		tick(cpu);
+		idle_mcycle(cpu);
 		cpu->pc = addr;
 	}
 }
@@ -327,74 +393,67 @@ static void call(Cpu *cpu, bool take) {
 static void ret(Cpu *cpu, bool take) {
 	if (take) {
 		cpu->pc = pop16(cpu);
-		tick(cpu);
+		idle_mcycle(cpu);
 	}
 }
 
 static void halt(Cpu *cpu) {
-	bool pending = bus_read(cpu->gb, ADDR_IE) & bus_read(cpu->gb, ADDR_IF) & IRQ_MASK;
-	if (!cpu->ime && pending) {
+	if (!cpu->ime && pending_irqs(cpu)) {
 		cpu->halt_bug = true;
 	} else {
 		cpu->halted = true;
 	}
 }
 
-static void exec(Cpu *cpu) {
-	uint16_t start = cpu->pc;
+/* -- instruction decoding -- */
+
+/* 0xCB-prefixed opcodes: rotates/shifts (x=0), BIT (x=1), RES (x=2), SET (x=3). */
+static void exec_cb(Cpu *cpu) {
 	uint8_t op = fetch8(cpu);
 	unsigned x = op >> 6;
 	unsigned y = (op >> 3) & 7;
 	unsigned z = op & 7;
 
-	cpu->trace_pc[cpu->trace_pos] = start;
-	cpu->trace_op[cpu->trace_pos] = op;
-	cpu->trace_pos = (uint8_t)((cpu->trace_pos + 1) & (CPU_TRACE - 1));
+	uint8_t value = get8(cpu, z);
 
 	switch (x) {
 	case 0:
-		exec_x0(cpu, y, z);
+		set8(cpu, z, shift(cpu, (ShiftOp)y, value));
 		break;
-	case 1:
-		if (y == 6 && z == 6) {
-			halt(cpu);
-		} else {
-			set8(cpu, y, get8(cpu, z));
-		}
-		break;
-	case 2:
-		alu(cpu, y, get8(cpu, z));
-		break;
-	default:
-		exec_x3(cpu, y, z);
-		break;
-	}
 
-	if (cpu->hung && !cpu->faulted) {
-		cpu->faulted = true;
-		cpu->fault_pc = start;
-		cpu->fault_op = op;
+	case 1:
+		cpu->f = (cpu->f & FLAG_C) | FLAG_H | ((value & (1u << y)) ? 0 : FLAG_Z);
+		break;
+
+	case 2:
+		set8(cpu, z, value & ~(1u << y));
+		break;
+
+	case 3:
+		set8(cpu, z, value | (1u << y));
+		break;
 	}
 }
 
-static void exec_x0(Cpu *cpu, unsigned y, unsigned z) {
+/* x = 0: misc, 16-bit loads/arithmetic, 8-bit INC/DEC/LD imm, accumulator ops. */
+static void exec_block0(Cpu *cpu, unsigned y, unsigned z) {
 	unsigned p = y >> 1;
 	bool q = y & 1;
 
 	switch (z) {
 	case 0:
 		switch (y) {
-		case 0:
+		case 0: /* NOP */
 			break;
-		case 1: {
+		case 1: { /* LD (a16),SP */
 			uint16_t addr = fetch16(cpu);
 			wr(cpu, addr, cpu->sp & 0xFF);
 			wr(cpu, addr + 1, cpu->sp >> 8);
 			break;
 		}
-		case 2:
+		case 2: /* STOP */
 			fetch8(cpu);
-			bus_write(cpu->gb, 0xFF04, 0);
+			bus_write(cpu->gb, REG_DIV, 0);
 			cpu->stopped = true;
 			break;
 		case 3:
@@ -408,13 +467,13 @@ static void exec_x0(Cpu *cpu, unsigned y, unsigned z) {
 
 	case 1:
 		if (q) {
-			add_hl(cpu, *rp(cpu, p));
+			add_hl(cpu, *reg16(cpu, p));
 		} else {
-			*rp(cpu, p) = fetch16(cpu);
+			*reg16(cpu, p) = fetch16(cpu);
 		}
 		break;
 
-	case 2: {
+	case 2: { /* LD (BC)/(DE)/(HL+)/(HL-) <-> A */
 		uint16_t addr = cpu->hl;
 		bool idu = false;
 
@@ -440,10 +499,10 @@ static void exec_x0(Cpu *cpu, unsigned y, unsigned z) {
 		break;
 	}
 
-	case 3: {
-		uint16_t *reg = rp(cpu, p);
+	case 3: { /* INC rr / DEC rr */
+		uint16_t *reg = reg16(cpu, p);
 
-		idu_tick(cpu, *reg);
+		idu_mcycle(cpu, *reg);
 		*reg += q ? -1 : 1;
 		break;
 	}
@@ -460,14 +519,14 @@ static void exec_x0(Cpu *cpu, unsigned y, unsigned z) {
 		set8(cpu, y, fetch8(cpu));
 		break;
 
-	default:
+	default: /* RLCA RRCA RLA RRA DAA CPL SCF CCF */
 		switch (y) {
 		case 0:
 		case 1:
 		case 2:
 		case 3:
-			cpu->a = shift(cpu, y, cpu->a);
-			cpu->f &= FLAG_C;
+			cpu->a = shift(cpu, (ShiftOp)y, cpu->a);
+			cpu->f &= FLAG_C; /* unlike the CB versions, Z is always cleared */
 			break;
 		case 4:
 			daa(cpu);
@@ -487,95 +546,70 @@ static void exec_x0(Cpu *cpu, unsigned y, unsigned z) {
 	}
 }
 
-static void exec_cb(Cpu *cpu) {
-	uint8_t op = fetch8(cpu);
-	unsigned x = op >> 6;
-	unsigned y = (op >> 3) & 7;
-	unsigned z = op & 7;
-
-	uint8_t value = get8(cpu, z);
-
-	switch (x) {
-	case 0:
-		set8(cpu, z, shift(cpu, y, value));
-		break;
-
-	case 1:
-		cpu->f = (cpu->f & FLAG_C) | FLAG_H | ((value & (1u << y)) ? 0 : FLAG_Z);
-		break;
-
-	case 2:
-		set8(cpu, z, value & ~(1u << y));
-		break;
-
-	case 3:
-		set8(cpu, z, value | (1u << y));
-		break;
-	}
-}
-
-static void exec_x3(Cpu *cpu, unsigned y, unsigned z) {
+/* x = 3: stack, jumps, calls, high-page loads, ALU immediates, RST. */
+static void exec_block3(Cpu *cpu, unsigned y, unsigned z) {
 	unsigned p = y >> 1;
 	bool q = y & 1;
 
 	switch (z) {
 	case 0:
 		switch (y) {
-		case 4:
-			wr(cpu, 0xFF00 | fetch8(cpu), cpu->a);
+		case 4: /* LDH (a8),A */
+			wr(cpu, LDH_BASE | fetch8(cpu), cpu->a);
 			break;
-		case 5:
+		case 5: /* ADD SP,e8 */
 			cpu->sp = sp_plus_e8(cpu);
-			tick(cpu);
-			tick(cpu);
+			idle_mcycle(cpu);
+			idle_mcycle(cpu);
 			break;
-		case 6:
-			cpu->a = rd(cpu, 0xFF00 | fetch8(cpu));
+		case 6: /* LDH A,(a8) */
+			cpu->a = rd(cpu, LDH_BASE | fetch8(cpu));
 			break;
-		case 7:
+		case 7: /* LD HL,SP+e8 */
 			cpu->hl = sp_plus_e8(cpu);
-			tick(cpu);
+			idle_mcycle(cpu);
 			break;
-		default:
-			tick(cpu);
+		default: /* RET cc */
+			idle_mcycle(cpu);
 			ret(cpu, cond(cpu, y));
 			break;
 		}
 		break;
 
 	case 1:
-		if (!q) {
-			uint16_t *reg = (p == 3) ? &cpu->af : rp(cpu, p);
-			*reg = pop16(cpu);
-			cpu->f &= 0xF0;
-		} else if (p == 0) {
+		if (!q) { /* POP rr */
+			*reg16_stack(cpu, p) = pop16(cpu);
+			if (p == 3) {
+				cpu->f &= FLAGS_MASK;
+			}
+		} else if (p == 0) { /* RET */
 			ret(cpu, true);
-		} else if (p == 1) {
+		} else if (p == 1) { /* RETI */
 			ret(cpu, true);
 			cpu->ime = true;
-		} else if (p == 2) {
+		} else if (p == 2) { /* JP HL */
 			cpu->pc = cpu->hl;
-		} else {
+		} else { /* LD SP,HL */
 			cpu->sp = cpu->hl;
-			tick(cpu);
+			idle_mcycle(cpu);
 		}
 		break;
 
 	case 2:
 		switch (y) {
-		case 4:
-			wr(cpu, 0xFF00 | cpu->c, cpu->a);
+		case 4: /* LDH (C),A */
+			wr(cpu, LDH_BASE | cpu->c, cpu->a);
 			break;
-		case 5:
+		case 5: /* LD (a16),A */
 			wr(cpu, fetch16(cpu), cpu->a);
 			break;
-		case 6:
-			cpu->a = rd(cpu, 0xFF00 | cpu->c);
+		case 6: /* LDH A,(C) */
+			cpu->a = rd(cpu, LDH_BASE | cpu->c);
 			break;
-		case 7:
+		case 7: /* LD A,(a16) */
 			cpu->a = rd(cpu, fetch16(cpu));
 			break;
-		default:
+		default: /* JP cc,a16 */
 			jp(cpu, cond(cpu, y));
 			break;
 		}
@@ -589,14 +623,14 @@ static void exec_x3(Cpu *cpu, unsigned y, unsigned z) {
 		case 1:
 			exec_cb(cpu);
 			break;
-		case 6:
+		case 6: /* DI */
 			cpu->ime = false;
 			cpu->ei_delay = 0;
 			break;
-		case 7:
+		case 7: /* EI: takes effect after the next instruction */
 			cpu->ei_delay = 2;
 			break;
-		default:
+		default: /* unused opcodes lock up the CPU */
 			cpu->hung = true;
 			break;
 		}
@@ -611,9 +645,8 @@ static void exec_x3(Cpu *cpu, unsigned y, unsigned z) {
 		break;
 
 	case 5:
-		if (!q) {
-			uint16_t value = (p == 3) ? cpu->af : *rp(cpu, p);
-			push16(cpu, value);
+		if (!q) { /* PUSH rr */
+			push16(cpu, *reg16_stack(cpu, p));
 		} else if (p == 0) {
 			call(cpu, true);
 		} else {
@@ -622,25 +655,73 @@ static void exec_x3(Cpu *cpu, unsigned y, unsigned z) {
 		break;
 
 	case 6:
-		alu(cpu, y, fetch8(cpu));
+		alu(cpu, (AluOp)y, fetch8(cpu));
 		break;
 
-	default:
+	default: /* RST */
 		push16(cpu, cpu->pc);
 		cpu->pc = y * 8;
 		break;
 	}
 }
 
+static void trace_record(Cpu *cpu, uint16_t pc, uint8_t op) {
+	cpu->trace_pc[cpu->trace_pos] = pc;
+	cpu->trace_op[cpu->trace_pos] = op;
+	cpu->trace_pos = (uint8_t)((cpu->trace_pos + 1) & (CPU_TRACE - 1));
+}
+
+static void exec(Cpu *cpu) {
+	uint16_t start = cpu->pc;
+	uint8_t op = fetch8(cpu);
+	unsigned x = op >> 6;
+	unsigned y = (op >> 3) & 7;
+	unsigned z = op & 7;
+
+	trace_record(cpu, start, op);
+
+	switch (x) {
+	case 0:
+		exec_block0(cpu, y, z);
+		break;
+	case 1:
+		if (y == OPERAND_HL_MEM && z == OPERAND_HL_MEM) {
+			halt(cpu);
+		} else {
+			set8(cpu, y, get8(cpu, z));
+		}
+		break;
+	case 2:
+		alu(cpu, (AluOp)y, get8(cpu, z));
+		break;
+	default:
+		exec_block3(cpu, y, z);
+		break;
+	}
+
+	if (cpu->hung && !cpu->faulted) {
+		cpu->faulted = true;
+		cpu->fault_pc = start;
+		cpu->fault_op = op;
+	}
+}
+
+/* -- interrupts and top-level step -- */
+
+/*
+ * Interrupt dispatch takes 5 M-cycles. The vector is chosen *after* the high
+ * byte of PC is pushed, so that push can cancel or redirect the interrupt by
+ * overwriting IE (a real hardware quirk); if nothing is pending anymore PC=0.
+ */
 static void service_interrupt(Cpu *cpu) {
 	cpu->ime = false;
 	cpu->ei_delay = 0;
-	tick(cpu);
-	idu_tick(cpu, cpu->sp);
+	idle_mcycle(cpu);
+	idu_mcycle(cpu, cpu->sp);
 	cpu->sp--;
 	wr_idu(cpu, cpu->sp, cpu->pc >> 8);
 
-	uint8_t pending = bus_read(cpu->gb, ADDR_IE) & bus_read(cpu->gb, ADDR_IF) & IRQ_MASK;
+	uint8_t pending = pending_irqs(cpu);
 	cpu->sp--;
 	wr(cpu, cpu->sp, cpu->pc & 0xFF);
 
@@ -649,21 +730,22 @@ static void service_interrupt(Cpu *cpu) {
 		while (!((pending >> bit) & 1)) {
 			bit++;
 		}
-		bus_write(cpu->gb, ADDR_IF, bus_read(cpu->gb, ADDR_IF) & ~(1u << bit));
-		cpu->pc = (uint16_t)(0x40 + bit * 8);
+		bus_write(cpu->gb, REG_IF, bus_read(cpu->gb, REG_IF) & ~(1u << bit));
+		cpu->pc = (uint16_t)(IRQ_VECTOR_BASE + bit * IRQ_VECTOR_STEP);
 	} else {
 		cpu->pc = 0;
 	}
-	tick(cpu);
+	idle_mcycle(cpu);
 }
 
-void cpu_reset(Cpu *cpu, Gb *gb, bool boot) {
+void cpu_reset(Cpu *cpu, Gb *gb, bool has_boot_rom) {
 	*cpu = (Cpu){0};
 	cpu->gb = gb;
-	if (boot) {
-		return;
+	if (has_boot_rom) {
+		return; /* the boot ROM sets up the registers itself, starting at PC 0 */
 	}
 
+	/* Register values the DMG boot ROM leaves behind. */
 	cpu->af = 0x01B0;
 	cpu->bc = 0x0013;
 	cpu->de = 0x00D8;
@@ -672,17 +754,18 @@ void cpu_reset(Cpu *cpu, Gb *gb, bool boot) {
 	cpu->pc = 0x0100;
 }
 
+/* Runs one instruction, one interrupt dispatch, or one idle M-cycle (halted/stopped/hung). */
 void cpu_step(Cpu *cpu) {
 	if (cpu->hung) {
-		tick(cpu);
+		idle_mcycle(cpu);
 		return;
 	}
 
-	uint8_t pending = bus_read(cpu->gb, ADDR_IE) & bus_read(cpu->gb, ADDR_IF) & IRQ_MASK;
+	uint8_t pending = pending_irqs(cpu);
 
 	if (cpu->stopped) {
-		if (!(bus_read(cpu->gb, ADDR_IF) & 0x10)) {
-			tick(cpu);
+		if (!(bus_read(cpu->gb, REG_IF) & (1u << IRQ_JOYPAD))) {
+			idle_mcycle(cpu);
 			return;
 		}
 		cpu->stopped = false;
@@ -690,7 +773,7 @@ void cpu_step(Cpu *cpu) {
 
 	if (cpu->halted) {
 		if (!pending) {
-			tick(cpu);
+			idle_mcycle(cpu);
 			return;
 		}
 		cpu->halted = false;
