@@ -19,7 +19,7 @@
 #define ALT_STACK_SIZE	(1 << 16)
 #define BACKTRACE_DEPTH 32
 
-static const int SIGNALS[] = {SIGSEGV, SIGBUS, SIGFPE, SIGILL, SIGABRT};
+static const int GUARDED_SIGNALS[] = {SIGSEGV, SIGBUS, SIGFPE, SIGILL, SIGABRT};
 
 static sigjmp_buf jump_env;
 static volatile sig_atomic_t armed;
@@ -43,16 +43,24 @@ const char *guard_signal_name(int sig) {
 	}
 }
 
-static void out(const char *text) {
+/* Raw write(2): stdio is not safe to use from a signal handler. */
+static void write_stderr(const char *text) {
 	ssize_t written = write(STDERR_FILENO, text, strlen(text));
 
 	(void)written;
 }
 
-static void fatal(int sig) {
-	out("\ngboyc: fatal error: ");
-	out(guard_signal_name(sig));
-	out("\n");
+/*
+ * A signal outside guard_run(): print what we can and restore the default
+ * action, so returning from the handler re-raises the fault and the process
+ * dies normally. backtrace_symbols_fd() is not formally async-signal-safe,
+ * but the process is going down anyway and guard_install() pre-loads the
+ * unwinder so it does not allocate here.
+ */
+static void report_fatal_signal(int sig) {
+	write_stderr("\ngboyc: fatal error: ");
+	write_stderr(guard_signal_name(sig));
+	write_stderr("\n");
 #ifdef GUARD_BACKTRACE
 	void *frames[BACKTRACE_DEPTH];
 	int count = backtrace(frames, BACKTRACE_DEPTH);
@@ -71,7 +79,7 @@ static void on_signal(int sig, siginfo_t *info, void *context) {
 		caught_address = info ? info->si_addr : NULL;
 		siglongjmp(jump_env, 1);
 	}
-	fatal(sig);
+	report_fatal_signal(sig);
 }
 
 void guard_install(void) {
@@ -91,8 +99,8 @@ void guard_install(void) {
 	action.sa_flags = SA_SIGINFO | SA_ONSTACK;
 	sigemptyset(&action.sa_mask);
 
-	for (size_t i = 0; i < sizeof SIGNALS / sizeof *SIGNALS; i++) {
-		sigaction(SIGNALS[i], &action, NULL);
+	for (size_t i = 0; i < sizeof GUARDED_SIGNALS / sizeof *GUARDED_SIGNALS; i++) {
+		sigaction(GUARDED_SIGNALS[i], &action, NULL);
 	}
 }
 
@@ -107,10 +115,10 @@ bool guard_run(GuardFn fn, void *arg) {
 	return true;
 }
 
-int guard_signal(void) {
+int guard_caught_signal(void) {
 	return (int)caught_signal;
 }
 
-void *guard_address(void) {
+void *guard_fault_address(void) {
 	return caught_address;
 }

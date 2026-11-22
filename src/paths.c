@@ -6,8 +6,9 @@
 #include "platform.h"
 
 #define APP_DIR		 "gboyc"
-#define FALLBACK_DIR "config"
+#define FALLBACK_DIR "config" /* relative to the working dir, used when HOME is unknown */
 
+/* Resolves (and caches) the XDG base directory for a root. */
 static const char *base(PathsRoot root) {
 	static char dirs[2][PATHS_MAX];
 	static bool ready[2];
@@ -36,31 +37,41 @@ static const char *base(PathsRoot root) {
 	return path;
 }
 
-bool paths_file(PathsRoot root, char *out, size_t size, const char *sub, const char *name) {
-	int n;
+/* Builds "<base>[/sub][/name]"; sub and name may be NULL or empty. */
+static bool join(char *out, size_t size, PathsRoot root, const char *sub, const char *name) {
+	const char *parts[] = {base(root), sub, name};
+	size_t len = 0;
 
-	if (sub && sub[0]) {
-		n = snprintf(out, size, "%s/%s/%s", base(root), sub, name);
-	} else {
-		n = snprintf(out, size, "%s/%s", base(root), name);
+	if (size == 0) {
+		return false;
 	}
-	return n >= 0 && (size_t)n < size;
+	out[0] = '\0';
+
+	for (size_t i = 0; i < sizeof parts / sizeof *parts; i++) {
+		if (!parts[i] || !parts[i][0]) {
+			continue;
+		}
+
+		int n = snprintf(out + len, size - len, "%s%s", i > 0 ? "/" : "", parts[i]);
+
+		if (n < 0 || (size_t)n >= size - len) {
+			return false;
+		}
+		len += (size_t)n;
+	}
+	return true;
+}
+
+bool paths_file(PathsRoot root, char *out, size_t size, const char *sub, const char *name) {
+	return join(out, size, root, sub, name);
+}
+
+bool paths_dir(PathsRoot root, char *out, size_t size) {
+	return join(out, size, root, NULL, NULL);
 }
 
 bool paths_make(PathsRoot root, const char *sub) {
 	char dir[PATHS_MAX];
-	int n;
 
-	if (sub && sub[0]) {
-		n = snprintf(dir, sizeof dir, "%s/%s", base(root), sub);
-	} else {
-		n = snprintf(dir, sizeof dir, "%s", base(root));
-	}
-	return n >= 0 && (size_t)n < sizeof dir && platform_make_dir(dir);
-}
-
-bool paths_dir(PathsRoot root, char *out, size_t size) {
-	int n = snprintf(out, size, "%s", base(root));
-
-	return n >= 0 && (size_t)n < size;
+	return join(dir, sizeof dir, root, sub, NULL) && platform_make_dir(dir);
 }
