@@ -101,12 +101,31 @@ void gb_mcycle_begin(Gb *gb) {
 	}
 }
 
+/*
+ * The console with the internal clock finished its 8 bits. If the other end is waiting for an
+ * external clock (SC = 0x80) the two bytes are swapped and both raise the serial interrupt;
+ * otherwise nobody answered and the master keeps the 0xFF it shifted in.
+ */
+static void link_exchange(Gb *master) {
+	Gb *peer = master->link;
+
+	if (!peer || peer->serial.sc != SERIAL_WAITING) {
+		return;
+	}
+	master->serial.sb = peer->serial.sb;
+	peer->serial.sb = master->serial.out;
+	peer->serial.sc &= (uint8_t)~SERIAL_TRANSFER_START;
+	gb_request_irq(peer, IRQ_SERIAL);
+}
+
 /* Advances every peripheral by one M-cycle, after the CPU's bus access. */
 void gb_mcycle_end(Gb *gb) {
+	gb->mcycles++;
 	if (timer_step(&gb->timer)) {
 		gb_request_irq(gb, IRQ_TIMER);
 	}
 	if (serial_step(&gb->serial)) {
+		link_exchange(gb);
 		gb_request_irq(gb, IRQ_SERIAL);
 	}
 	gb_request_ppu_irqs(gb, ppu_mcycle(&gb->ppu));
@@ -118,6 +137,30 @@ bool gb_run_frame(Gb *gb) {
 	for (unsigned i = 0; i < MAX_STEPS_PER_FRAME; i++) {
 		cpu_step(&gb->cpu);
 		if (ppu_take_frame(&gb->ppu)) {
+			return true;
+		}
+	}
+	return false;
+}
+
+void gb_link(Gb *a, Gb *b) {
+	a->link = b;
+	if (b) {
+		b->link = a;
+		b->serial.suppress_output = true; /* only the first console prints serial output */
+	}
+}
+
+bool gb_run_frame_linked(Gb *a, Gb *b) {
+	Gb *gb[2] = {a, b};
+	bool done[2] = {false, false};
+
+	for (unsigned i = 0; i < 2 * MAX_STEPS_PER_FRAME; i++) {
+		int next = done[0] ? 1 : (done[1] ? 0 : (a->mcycles <= b->mcycles ? 0 : 1));
+
+		cpu_step(&gb[next]->cpu);
+		done[next] = done[next] || ppu_take_frame(&gb[next]->ppu);
+		if (done[0] && done[1]) {
 			return true;
 		}
 	}

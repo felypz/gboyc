@@ -4,6 +4,10 @@
 #include <stdbool.h>
 #include <stdint.h>
 
+#define SERIAL_TRANSFER_START 0x80
+/* SC value of a console waiting for the other end to clock a transfer (external clock). */
+#define SERIAL_WAITING SERIAL_TRANSFER_START
+
 typedef struct {
 	uint8_t sb;
 	uint8_t sc;

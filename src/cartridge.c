@@ -296,7 +296,7 @@ void cartridge_discard_battery_changes(Cartridge *c) {
 	}
 }
 
-Cartridge *cartridge_load(const char *path) {
+Cartridge *cartridge_load(const char *path, bool persist) {
 	Cartridge *c = calloc(1, sizeof *c);
 	if (!c) {
 		return NULL;
@@ -318,6 +318,7 @@ Cartridge *cartridge_load(const char *path) {
 
 	mapper_reset(&c->map);
 
+	c->battery = c->battery && persist;
 	if (c->battery) {
 		if (!make_save_path(c, path)) {
 			log_error("cartridge: path too long for the save file");

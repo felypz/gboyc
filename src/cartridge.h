@@ -7,7 +7,8 @@
 
 typedef struct Cartridge Cartridge;
 
-Cartridge *cartridge_load(const char *path);
+/* persist == false never reads or writes the .sav file (the second console of a linked pair). */
+Cartridge *cartridge_load(const char *path, bool persist);
 void cartridge_free(Cartridge *c);
 void cartridge_reset(Cartridge *c);
 /* Writes battery RAM / RTC to the .sav file next to the ROM, if it changed. */

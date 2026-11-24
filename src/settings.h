@@ -12,6 +12,7 @@ typedef struct {
 	bool boot_rom_enabled;
 	char boot_rom_file[SETTINGS_NAME_MAX];
 	ThemeMode theme;
+	int players; /* 1, or 2 for two linked consoles side by side */
 	Bindings bindings;
 } Settings;
 

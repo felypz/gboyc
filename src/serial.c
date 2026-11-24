@@ -5,7 +5,7 @@
 #include "memmap.h"
 #include "timing.h"
 
-#define SC_TRANSFER_START	0x80
+#define SC_TRANSFER_START	SERIAL_TRANSFER_START
 #define SC_INTERNAL_CLOCK	0x01
 #define SC_WRITABLE			(SC_TRANSFER_START | SC_INTERNAL_CLOCK)
 #define SC_UNUSED_BITS		0x7E

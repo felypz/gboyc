@@ -57,8 +57,11 @@ typedef struct {
 	Ui ui;
 
 	Gb gb;
+	Gb gb2; /* second console of a linked pair; only valid while linked */
+	bool linked;
 	Stepper stepper;
 	Cartridge *cart;
+	Cartridge *cart2; /* same ROM as cart, without battery saves */
 	char rom_path[PATHS_MAX];
 
 	int slot; /* current savestate slot, 1-9 */
@@ -157,8 +160,12 @@ static void clear_crash(App *a) {
 static void unload_game(App *a) {
 	stepper_discard(&a->stepper);
 	cartridge_free(a->cart);
+	cartridge_free(a->cart2);
 	a->cart = NULL;
+	a->cart2 = NULL;
 	a->gb.cart = NULL;
+	a->gb2.cart = NULL;
+	a->linked = false;
 }
 
 static void init_gb(App *a) {
@@ -180,20 +187,34 @@ static void init_gb(App *a) {
 		log_verbose("Boot: no boot ROM available, starting in the post-boot state");
 	}
 	gb_init(&a->gb, a->cart, boot_rom);
+	if (a->linked) {
+		gb_init(&a->gb2, a->cart2, boot_rom);
+		gb_link(&a->gb, &a->gb2);
+	}
 }
 
 static bool start_game(App *a, const char *path) {
 	/* Flush the current game first: the new ROM may be the same file (and so the same .sav). */
 	cartridge_flush_battery(a->cart);
 
-	Cartridge *loaded = cartridge_load(path);
+	Cartridge *loaded = cartridge_load(path, true);
+	Cartridge *second = NULL;
 
+	if (loaded && a->settings.players == 2) {
+		second = cartridge_load(path, false);
+		if (!second) {
+			cartridge_free(loaded);
+			loaded = NULL;
+		}
+	}
 	if (!loaded) {
 		return false;
 	}
 
 	unload_game(a);
 	a->cart = loaded;
+	a->cart2 = second;
+	a->linked = second != NULL;
 	init_gb(a);
 	snprintf(a->rom_path, sizeof a->rom_path, "%s", path);
 	a->paused = false;
@@ -212,6 +233,9 @@ static void reset_game(App *a) {
 	stepper_discard(&a->stepper);
 	cartridge_flush_battery(a->cart);
 	cartridge_reset(a->cart);
+	if (a->linked) {
+		cartridge_reset(a->cart2);
+	}
 	init_gb(a);
 	a->paused = false;
 	clear_crash(a);
@@ -255,11 +279,21 @@ static void drain_audio(App *a) {
 	const float *samples;
 
 	gb_take_audio(&a->gb, &samples);
+	if (a->linked) {
+		gb_take_audio(&a->gb2, &samples);
+	}
 }
 
+/* Only the first console is heard; the second one's samples are discarded. */
 static void push_audio(App *a) {
 	const float *samples;
 	size_t frames = gb_take_audio(&a->gb, &samples);
+
+	if (a->linked) {
+		const float *unused;
+
+		gb_take_audio(&a->gb2, &unused);
+	}
 
 	if (a->speed == 1) {
 		platform_audio_push(a->plat, samples, frames);
@@ -269,7 +303,7 @@ static void push_audio(App *a) {
 /* -- Crashes -- */
 
 /* Shows the crash screen for a.crash.report, which the caller has already filled in. */
-static void enter_crash(App *a) {
+static void enter_crash(App *a, const Gb *gb) {
 	a->crash.active = true;
 	a->crash.ignored = false;
 	a->menu_open = true;
@@ -279,7 +313,7 @@ static void enter_crash(App *a) {
 	}
 	ui_open_crash(&a->ui, &a->crash.report);
 	platform_audio_clear(a->plat);
-	crash_print(&a->crash.report, &a->gb, log_verbose_enabled());
+	crash_print(&a->crash.report, gb, log_verbose_enabled());
 }
 
 /* The emulator itself crashed (signal caught by guard_run). */
@@ -293,19 +327,24 @@ static void enter_emulator_fault(App *a) {
 	snprintf(detail, sizeof detail, "Fault address %#lx",
 			 (unsigned long)(uintptr_t)guard_fault_address());
 	crash_emulator(&a->crash.report, &a->gb, reason, detail);
-	enter_crash(a);
+	enter_crash(a, &a->gb);
 }
 
 /* gb_run_frame() gave up: the guest never produced a frame. */
 static void enter_emulator_stall(App *a) {
 	crash_emulator(&a->crash.report, &a->gb, "Emulation stalled", "A frame did not finish in time");
-	enter_crash(a);
+	enter_crash(a, &a->gb);
 }
 
 /* Detects a crash of the emulated game (illegal opcode, HALT that can never wake up). */
 static void check_guest_crash(App *a) {
-	if (!a->crash.ignored && crash_detect_game(&a->gb, &a->crash.report)) {
-		enter_crash(a);
+	if (a->crash.ignored) {
+		return;
+	}
+	if (crash_detect_game(&a->gb, &a->crash.report)) {
+		enter_crash(a, &a->gb);
+	} else if (a->linked && crash_detect_game(&a->gb2, &a->crash.report)) {
+		enter_crash(a, &a->gb2);
 	}
 }
 
@@ -326,10 +365,17 @@ static bool commit_pending(App *a) {
 	return false;
 }
 
+static bool linked_unsupported(App *a, const char *what) {
+	if (a->linked) {
+		osd_show(a, "%s: 1 player only", what);
+	}
+	return a->linked;
+}
+
 static void save_state(App *a) {
 	char path[PATHS_MAX];
 
-	if (!commit_pending(a)) {
+	if (linked_unsupported(a, "Save state") || !commit_pending(a)) {
 		return;
 	}
 	if (!state_ensure_dir() || !state_path(path, sizeof path, a->rom_path, a->slot)) {
@@ -343,6 +389,10 @@ static void save_state(App *a) {
 
 static bool load_state(App *a) {
 	char path[PATHS_MAX];
+
+	if (linked_unsupported(a, "Load state")) {
+		return false;
+	}
 
 	if (!state_path(path, sizeof path, a->rom_path, a->slot)) {
 		osd_show(a, "Path error");
@@ -396,12 +446,15 @@ static void step_job(void *arg) {
 }
 
 static void step(App *a, ShortcutAction action) {
+	if (linked_unsupported(a, "Stepping")) {
+		return;
+	}
 	if (!a->paused) {
 		osd_show(a, "Pause to step");
 		return;
 	}
 	if (!a->stepper.pending) {
-		gb_set_joypad(&a->gb, platform_joypad(&a->settings.bindings));
+		gb_set_joypad(&a->gb, platform_joypad(a->plat, &a->settings.bindings, 0, 1));
 	}
 
 	StepJob job = {a, action, false};
@@ -420,6 +473,18 @@ static void step(App *a, ShortcutAction action) {
 }
 
 /* -- Input -- */
+
+static void gamepad_notice(App *a, const PlatformEvent *ev) {
+	bool added = ev->type == PLATFORM_EV_GAMEPAD_ADDED;
+	const char *text = added ? "Gamepad connected" : "Gamepad disconnected";
+
+	log_verbose("%s: %s", text, ev->path);
+	if (a->state == APP_RUNNING && !a->menu_open) {
+		osd_show(a, "%s", text);
+	} else if (!a->ui.capturing) {
+		ui_notify(&a->ui, text, false);
+	}
+}
 
 static void handle_shortcut(App *a, ShortcutAction action) {
 	switch (action) {
@@ -463,6 +528,15 @@ static bool handle_running_event(App *a, const PlatformEvent *ev) {
 		if (!ev->repeat) {
 			open_menu(a);
 		}
+		return true;
+	case PLATFORM_EV_GAMEPAD_ADDED:
+	case PLATFORM_EV_GAMEPAD_REMOVED:
+		gamepad_notice(a, ev);
+		return true;
+	case PLATFORM_EV_GAMEPAD_MENU:
+		open_menu(a);
+		return true;
+	case PLATFORM_EV_GAMEPAD_BUTTON: /* the game reads the buttons itself, see platform_joypad */
 		return true;
 	default:
 		break;
@@ -522,6 +596,20 @@ static void resume_or_dismiss(App *a) {
 
 /* Returns false when the app should quit. */
 static bool handle_ui_event(App *a, const PlatformEvent *ev) {
+	PlatformEvent nav = {0};
+
+	if (ev->type == PLATFORM_EV_GAMEPAD_ADDED || ev->type == PLATFORM_EV_GAMEPAD_REMOVED) {
+		gamepad_notice(a, ev);
+		return true;
+	}
+	if (ev->type == PLATFORM_EV_GAMEPAD_BUTTON) {
+		/* Menus are driven with the D-pad (and face buttons) like with the arrow keys. */
+		if (!platform_gamepad_nav(ev->key, &nav.type)) {
+			return true;
+		}
+		ev = &nav;
+	}
+
 	switch (ui_handle_event(&a->ui, a->plat, ev)) {
 	case UI_ACTION_QUIT:
 		return false;
@@ -605,7 +693,9 @@ static void frame_job(void *arg) {
 		inject_crash(a);
 	}
 	for (int i = 0; i < a->speed; i++) {
-		if (!gb_run_frame(&a->gb)) {
+		bool ok = a->linked ? gb_run_frame_linked(&a->gb, &a->gb2) : gb_run_frame(&a->gb);
+
+		if (!ok) {
 			job->complete = false;
 			return;
 		}
@@ -622,7 +712,12 @@ static void run_emulation(App *a) {
 		a->crash.inject_pending = true;
 	}
 
-	gb_set_joypad(&a->gb, platform_joypad(&a->settings.bindings));
+	int players = a->linked ? 2 : 1;
+
+	gb_set_joypad(&a->gb, platform_joypad(a->plat, &a->settings.bindings, 0, players));
+	if (a->linked) {
+		gb_set_joypad(&a->gb2, platform_joypad(a->plat, &a->settings.bindings, 1, players));
+	}
 	if (!guard_run(frame_job, &job)) {
 		enter_emulator_fault(a);
 		return;
@@ -661,7 +756,11 @@ static void draw(App *a) {
 		stats_reset(a);
 	}
 	platform_set_background(a->plat, COLOR_BLACK);
-	platform_draw_frame(a->plat, gb_framebuffer(&a->gb));
+	if (a->linked) {
+		platform_draw_frames(a->plat, gb_framebuffer(&a->gb), gb_framebuffer(&a->gb2));
+	} else {
+		platform_draw_frame(a->plat, gb_framebuffer(&a->gb));
+	}
 	if (a->menu_open) {
 		ui_draw(&a->ui, a->plat);
 	} else {

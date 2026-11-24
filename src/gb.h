@@ -54,6 +54,8 @@ typedef struct Gb {
 	uint8_t io[MEM_IO_SIZE];
 	uint8_t ie;
 	GbStep step;
+	uint64_t mcycles; /* M-cycles since gb_init(); keeps two linked consoles in step */
+	struct Gb *link;  /* console on the other end of the link cable, or NULL */
 } Gb;
 
 /* boot_rom == NULL starts directly in the post-boot state. */
@@ -63,6 +65,13 @@ void gb_mcycle_begin(Gb *gb);
 void gb_mcycle_end(Gb *gb);
 /* Runs until a frame is ready. Returns false if the frame budget was exhausted (guest stalled). */
 bool gb_run_frame(Gb *gb);
+/* Connects two consoles with a link cable (serial port). Call again with NULL to unplug. */
+void gb_link(Gb *a, Gb *b);
+/*
+ * Runs both consoles in lock-step (always the one that is behind) until each has produced a
+ * frame. Returns false if either gave up.
+ */
+bool gb_run_frame_linked(Gb *a, Gb *b);
 bool gb_state_sane(const Gb *gb);
 void gb_set_joypad(Gb *gb, uint8_t mask);
 

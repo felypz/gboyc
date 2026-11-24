@@ -15,8 +15,12 @@ void settings_defaults(Settings *s) {
 	s->boot_rom_enabled = true;
 	snprintf(s->boot_rom_file, sizeof s->boot_rom_file, "%s", DEFAULT_BOOT_ROM_FILE);
 	s->theme = THEME_AUTO;
-	platform_default_pad(&s->bindings);
+	s->players = 1;
 	platform_default_shortcuts(&s->bindings);
+	for (int player = 0; player < MAX_PLAYERS; player++) {
+		platform_default_pad(&s->bindings, player);
+		platform_default_gamepad(&s->bindings, player);
+	}
 }
 
 /* The boot ROM is looked up inside the data dir, so it must be a bare file name. */
@@ -48,6 +52,8 @@ static void parse_line(Settings *s, char *line) {
 		}
 	} else if (strcmp(name, "theme") == 0) {
 		s->theme = theme_mode_parse(value);
+	} else if (strcmp(name, "players") == 0) {
+		s->players = strcmp(value, "2") == 0 ? 2 : 1;
 	} else {
 		bindings_parse(&s->bindings, name, value);
 	}
@@ -86,8 +92,9 @@ bool settings_save(const Settings *s) {
 		return false;
 	}
 
-	fprintf(out.file, "boot_rom=%s\nboot_rom_file=%s\ntheme=%s\n",
-			s->boot_rom_enabled ? "on" : "off", s->boot_rom_file, theme_mode_key(s->theme));
+	fprintf(out.file, "boot_rom=%s\nboot_rom_file=%s\ntheme=%s\nplayers=%d\n",
+			s->boot_rom_enabled ? "on" : "off", s->boot_rom_file, theme_mode_key(s->theme),
+			s->players);
 	bindings_write(&s->bindings, out.file);
 	return atomic_file_commit(&out);
 }

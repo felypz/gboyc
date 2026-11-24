@@ -11,7 +11,9 @@ typedef enum {
 	UI_SCREEN_MENU,
 	UI_SCREEN_ROM_DROP,
 	UI_SCREEN_SETTINGS,
-	UI_SCREEN_CONTROLS,
+	UI_SCREEN_KEYBOARD, /* "Controls": the selected player's keyboard binds */
+	UI_SCREEN_GAMEPAD,	/* "Controls": the selected player's gamepad binds */
+	UI_SCREEN_PAD_TEST,
 	UI_SCREEN_SHORTCUTS,
 	UI_SCREEN_PAUSE,
 	UI_SCREEN_CRASH,
@@ -33,8 +35,12 @@ typedef struct {
 	UiScreen parent;
 	int row;
 	int sel[UI_SCREEN_COUNT];
-	int slot;
+	int player;			 /* whose binds the keyboard / gamepad screens edit (0 or 1) */
+	int test_pad;		 /* gamepad shown on the controller test screen */
+	bool prefer_gamepad; /* which device tab opens first; survives reset */
 	bool capturing;
+	bool bind_all;		  /* "bind all" is walking through the items of this screen */
+	Bindings bind_backup; /* restored if bind all is cancelled */
 	bool dialog_open;
 	PlatformDialog dialog_kind;
 	bool boot_rom_installed;

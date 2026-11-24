@@ -46,12 +46,30 @@
 #define ROW_PAD		16
 
 /* Controls / shortcuts rows are denser and carry key cells. */
-#define PAD_ROW_H		32
-#define PAD_ROW_PITCH	36
-#define PAD_COL_X		(MARGIN_X + 128)
+#define PAD_ROW_H		24
+#define PAD_ROW_PITCH	28
 #define PAD_CELL_W		168
-#define PAD_CELL_GAP	8
 #define SHORTCUT_CELL_X (CONTENT_RIGHT - ROW_PAD - PAD_CELL_W)
+
+/* Controller test screen. */
+#define PAD_TEST_BACK_Y 434
+#define TEST_TITLE_Y	112
+#define TEST_BOX_Y		124 /* the three direction squares */
+#define TEST_BOX_SIZE	136
+#define TEST_BOX_COUNT	3
+#define TEST_DOT		12
+#define TEST_READ_Y		268
+#define TEST_VALUES_Y	288
+#define TEST_LOWER_Y	310 /* headings of the Game Boy diagram and the button list */
+#define TEST_GB_Y		322
+#define TEST_GB_W		240
+#define TEST_GB_H		100
+#define TEST_CHIP_X		(MARGIN_X + TEST_GB_W + 8)
+#define TEST_CHIP_W		84
+#define TEST_CHIP_H		16
+#define TEST_CHIP_GAP	6
+#define TEST_CHIP_PITCH 20
+#define TEST_CHIP_COLS	3
 
 /* Footer: status bar, divider, key hints. */
 #define STATUS_Y	  480
@@ -109,6 +127,7 @@ enum {
 enum {
 	SET_BOOT_ROM_ENABLED,
 	SET_BOOT_ROM_FILE,
+	SET_PLAYERS,
 	SET_CONTROLS,
 	SET_SHORTCUTS,
 	SET_THEME,
@@ -135,15 +154,14 @@ enum {
 	CR_COUNT,
 };
 
-/* Controls screen: one row per button, then "reset" and "back". */
-#define PAD_ROWS  (JOY_BTN_COUNT + 2)
-#define PAD_RESET JOY_BTN_COUNT
-#define PAD_BACK  (JOY_BTN_COUNT + 1)
-
-/* Shortcuts screen: one row per action, then "reset" and "back". */
-#define SHORTCUT_ROWS	   (SC_COUNT + 2)
-#define SHORTCUT_RESET_ROW SC_COUNT
-#define SHORTCUT_BACK_ROW  (SC_COUNT + 1)
+/*
+ * The controls (keyboard / gamepad) and shortcuts screens share one layout: for controls a
+ * "player" row and a "device" row, then "bind all", the bindable items, "reset to default"
+ * and "back".
+ */
+#define BIND_ROW_PLAYER 0
+#define BIND_ROW_DEVICE 1
+#define BIND_HEAD_ROWS	2
 
 typedef struct {
 	const char *key;
@@ -159,12 +177,12 @@ typedef struct {
 
 static const char *const MENU_LABELS[MENU_COUNT] = {"Load ROM", "Settings", "Quit"};
 static const char *const PAUSE_LABELS[PAUSE_COUNT] = {
-	"Continue", "Reset", "Game controls", "Emulator shortcuts", "Load ROM", "Main menu"};
+	"Continue", "Reset", "Controls", "Emulator shortcuts", "Load ROM", "Main menu"};
 static const char *const PAUSE_VALUES[PAUSE_COUNT] = {NULL, NULL, ">", ">", NULL, NULL};
 static const char *const CRASH_LABELS[CR_COUNT] = {"Reset", "Load state", "Load ROM", "Main menu",
 												   "Dismiss"};
 
-/* Row order on the controls screen. */
+/* Row order of the Game Boy buttons on the controls and gamepad screens. */
 static const JoyButton PAD_ORDER[JOY_BTN_COUNT] = {
 	JOY_BTN_UP, JOY_BTN_DOWN, JOY_BTN_LEFT,	  JOY_BTN_RIGHT,
 	JOY_BTN_A,	JOY_BTN_B,	  JOY_BTN_SELECT, JOY_BTN_START,
@@ -174,12 +192,92 @@ static const Hint HINTS_MENU[] = {{"UP/DOWN", "Select"}, {"ENTER", "Open"}};
 static const Hint HINTS_PAUSE[] = {{"UP/DOWN", "Select"}, {"ENTER", "Open"}, {"ESC", "Resume"}};
 static const Hint HINTS_SETTINGS[] = {
 	{"UP/DOWN", "Select"}, {"L/R", "Adjust"}, {"ENTER", "Open"}, {"ESC", "Back"}};
+static int hint_at(const Hint *hints, int count, int mx, int my);
+static const Hint HINTS_PAD_TEST[] = {{"L/R", "Gamepad"}, {"ESC", "Back"}, {"BACK+START", "Back"}};
+/* Controls: the hint bar doubles as buttons (HINT_EVENTS lists what each one sends). */
 static const Hint HINTS_CONTROLS[] = {
-	{"UP/DOWN", "Select"}, {"L/R", "Slot"}, {"ENTER", "Rebind"}, {"DEL", "Clear"}, {"ESC", "Back"}};
-static const Hint HINTS_SHORTCUTS[] = {
-	{"UP/DOWN", "Select"}, {"ENTER", "Rebind"}, {"DEL", "Clear"}, {"ESC", "Back"}};
-static const Hint HINTS_CAPTURE[] = {{"KEY", "Bind"}, {"ESC", "Cancel"}};
+	{"ESC", "Back"}, {"ENTER", "Rebind"}, {"DEL", "Clear"}, {"F1", "Test"}};
+static const PlatformEventType HINT_EVENTS_CONTROLS[] = {PLATFORM_EV_BACK, PLATFORM_EV_CONFIRM,
+														 PLATFORM_EV_CLEAR, PLATFORM_EV_TEST};
+static const Hint HINTS_BIND[] = {{"ESC", "Back"}, {"ENTER", "Rebind"}, {"DEL", "Clear"}};
+static const Hint HINTS_CAPTURE_KEY[] = {{"KEY", "Bind"}, {"ESC", "Cancel"}};
+static const Hint HINTS_CAPTURE_BUTTON[] = {{"BTN", "Bind"}, {"ESC", "Cancel"}};
+/* "Bind all": DEL leaves the current bind unmapped, ENTER stops and leaves the rest unmapped. */
+static const Hint HINTS_BIND_ALL_KEY[] = {
+	{"KEY", "Bind"}, {"DEL", "Unmapped"}, {"ENTER", "Finish"}, {"ESC", "Cancel"}};
+static const Hint HINTS_BIND_ALL_BUTTON[] = {
+	{"BTN", "Bind"}, {"DEL", "Unmapped"}, {"ENTER", "Finish"}, {"ESC", "Cancel"}};
 static const Hint HINTS_CRASH[] = {{"UP/DOWN", "Select"}, {"ENTER", "Open"}};
+
+/* -- Binding screens: what each one edits -- */
+
+static BindKind bind_kind(UiScreen screen) {
+	switch (screen) {
+	case UI_SCREEN_GAMEPAD:
+		return BIND_GAMEPAD;
+	case UI_SCREEN_SHORTCUTS:
+		return BIND_SHORTCUT;
+	default:
+		return BIND_PAD;
+	}
+}
+
+static int bind_item_count(UiScreen screen) {
+	return bind_kind(screen) == BIND_SHORTCUT ? SC_COUNT : JOY_BTN_COUNT;
+}
+
+/* Keyboard and gamepad are two tabs of one player's controls, switched on the first row. */
+static bool has_device_row(UiScreen screen) {
+	return screen == UI_SCREEN_KEYBOARD || screen == UI_SCREEN_GAMEPAD;
+}
+
+static int bind_all_row(UiScreen screen) {
+	return has_device_row(screen) ? BIND_HEAD_ROWS : 0;
+}
+
+static int bind_first_row(UiScreen screen) {
+	return bind_all_row(screen) + 1;
+}
+
+static int bind_reset_row(UiScreen screen) {
+	return bind_first_row(screen) + bind_item_count(screen);
+}
+
+static int bind_row_count(UiScreen screen) {
+	return bind_reset_row(screen) + 2;
+}
+
+static int bind_back_row(UiScreen screen) {
+	return bind_reset_row(screen) + 1;
+}
+
+static bool row_is_item(UiScreen screen, int row) {
+	return row >= bind_first_row(screen) && row < bind_reset_row(screen);
+}
+
+/* Index into Bindings (a JoyButton or a ShortcutAction) for a row. */
+static int bind_index(UiScreen screen, int row) {
+	int item = row - bind_first_row(screen);
+
+	if (bind_kind(screen) == BIND_SHORTCUT) {
+		return item;
+	}
+	return PAD_ORDER[item];
+}
+
+static const char *bind_label(UiScreen screen, int index) {
+	switch (bind_kind(screen)) {
+	case BIND_SHORTCUT:
+		return bindings_shortcut_label((ShortcutAction)index);
+	default:
+		return bindings_pad_label((JoyButton)index);
+	}
+}
+
+/* Shortcuts are shared by both players and stored with player 0. */
+static int bind_player(const Ui *ui) {
+	return ui->screen == UI_SCREEN_SHORTCUTS ? 0 : ui->player;
+}
 
 static ListGeom geom(UiScreen screen) {
 	switch (screen) {
@@ -187,10 +285,12 @@ static ListGeom geom(UiScreen screen) {
 		return (ListGeom){HERO_LIST_Y, ROW_PITCH, ROW_H, MENU_COUNT};
 	case UI_SCREEN_SETTINGS:
 		return (ListGeom){LIST_Y, ROW_PITCH, ROW_H, SETTINGS_COUNT};
-	case UI_SCREEN_CONTROLS:
-		return (ListGeom){LIST_Y, PAD_ROW_PITCH, PAD_ROW_H, PAD_ROWS};
+	case UI_SCREEN_KEYBOARD:
+	case UI_SCREEN_GAMEPAD:
 	case UI_SCREEN_SHORTCUTS:
-		return (ListGeom){LIST_Y, PAD_ROW_PITCH, PAD_ROW_H, SHORTCUT_ROWS};
+		return (ListGeom){LIST_Y, PAD_ROW_PITCH, PAD_ROW_H, bind_row_count(screen)};
+	case UI_SCREEN_PAD_TEST:
+		return (ListGeom){PAD_TEST_BACK_Y, ROW_PITCH, ROW_H, 1};
 	case UI_SCREEN_PAUSE:
 		return (ListGeom){LIST_Y, ROW_PITCH, ROW_H, PAUSE_COUNT};
 	case UI_SCREEN_CRASH:
@@ -273,7 +373,10 @@ static void ellipsize(char *out, size_t size, const char *in, size_t max) {
 
 /* Clears everything except the settings pointer and starts on the given screen. */
 static void reset(Ui *ui, Settings *settings, UiScreen screen, bool in_game) {
+	bool prefer_gamepad = ui->prefer_gamepad;
+
 	memset(ui, 0, sizeof *ui);
+	ui->prefer_gamepad = prefer_gamepad;
 	ui->settings = settings;
 	ui->system_dark = platform_system_dark();
 	ui->screen = screen;
@@ -313,9 +416,33 @@ static void open_settings(Ui *ui) {
 }
 
 static void open_controls(Ui *ui) {
-	go_child(ui, UI_SCREEN_CONTROLS);
-	ui->slot = 0;
+	go_child(ui, ui->prefer_gamepad ? UI_SCREEN_GAMEPAD : UI_SCREEN_KEYBOARD);
 	ui->capturing = false;
+}
+
+/* Flips between the keyboard and gamepad binds of the same player. */
+static void switch_device(Ui *ui) {
+	ui->sel[ui->screen] = ui->row;
+	ui->screen = ui->screen == UI_SCREEN_KEYBOARD ? UI_SCREEN_GAMEPAD : UI_SCREEN_KEYBOARD;
+	ui->prefer_gamepad = ui->screen == UI_SCREEN_GAMEPAD;
+	ui->status[0] = '\0';
+}
+
+/* Flips between Player 1's and Player 2's binds on the same device. */
+static void switch_player(Ui *ui) {
+	ui->player = (ui->player + 1) % MAX_PLAYERS;
+	ui->status[0] = '\0';
+}
+
+static void open_pad_test(Ui *ui, Platform *p) {
+	int count = platform_gamepad_count(p);
+
+	ui->test_pad = ui->player < count ? ui->player : 0;
+	ui->sel[ui->screen] = ui->row;
+	ui->screen = UI_SCREEN_PAD_TEST;
+	ui->row = 0;
+	ui->status[0] = '\0';
+	platform_capture_input(p, PLATFORM_CAPTURE_MONITOR);
 }
 
 static void open_shortcuts(Ui *ui) {
@@ -345,9 +472,16 @@ static void cycle_theme(Ui *ui, int dir) {
 	save_settings(ui);
 }
 
+static void toggle_players(Ui *ui) {
+	ui->settings->players = ui->settings->players == 1 ? 2 : 1;
+	save_settings(ui);
+}
+
 static void adjust_setting(Ui *ui, int dir) {
 	if (ui->row == SET_BOOT_ROM_ENABLED) {
 		toggle_boot_rom(ui);
+	} else if (ui->row == SET_PLAYERS) {
+		toggle_players(ui);
 	} else if (ui->row == SET_THEME) {
 		cycle_theme(ui, dir);
 	}
@@ -369,139 +503,216 @@ static void import_boot_rom(Ui *ui, const char *path) {
 	save_settings(ui);
 }
 
-/* -- Key capture (controls and shortcuts screens) -- */
+/* -- Key / button capture (controls, gamepad and shortcuts screens) -- */
 
-static void stop_capture(Ui *ui, Platform *p, const char *status) {
-	ui->capturing = false;
-	platform_capture_keys(p, false);
-	set_status(ui, status, false);
+static void set_capture(Ui *ui, Platform *p, PlatformCapture mode) {
+	ui->capturing = mode != PLATFORM_CAPTURE_OFF;
+	platform_capture_input(p, mode);
 }
 
-static void start_capture(Ui *ui, Platform *p, const char *name) {
-	char text[48];
+static void stop_capture(Ui *ui, Platform *p) {
+	ui->bind_all = false;
+	set_capture(ui, p, PLATFORM_CAPTURE_OFF);
+}
 
-	ui->capturing = true;
-	platform_capture_keys(p, true);
-	snprintf(text, sizeof text, "Press a key for %s...", name);
+static void prompt_bind(Ui *ui) {
+	const char *what = bind_kind(ui->screen) == BIND_GAMEPAD ? "button" : "key";
+	const char *label = bind_label(ui->screen, bind_index(ui->screen, ui->row));
+	char text[sizeof ui->status];
+
+	if (ui->bind_all) {
+		snprintf(text, sizeof text, "%d/%d Press %s: %s", ui->row, bind_item_count(ui->screen),
+				 what, label);
+	} else {
+		snprintf(text, sizeof text, "Press %s: %s", what, label);
+	}
 	set_status(ui, text, false);
 }
 
-static void bind_captured_key(Ui *ui, Platform *p, const PlatformEvent *ev) {
-	bool is_pad = ui->screen == UI_SCREEN_CONTROLS;
-	BindKind kind = is_pad ? BIND_PAD : BIND_SHORTCUT;
-	int index = is_pad ? (int)PAD_ORDER[ui->row] : ui->row;
-	char msg[48];
+static void start_capture(Ui *ui, Platform *p) {
+	set_capture(ui, p, PLATFORM_CAPTURE_SINGLE);
+	prompt_bind(ui);
+}
 
-	if (ev->key == KEY_NONE || !platform_key_valid(ev->key)) {
+/* Starts at the first item with every bind of this screen cleared. */
+static void start_bind_all(Ui *ui, Platform *p) {
+	UiScreen screen = ui->screen;
+
+	ui->bind_backup = ui->settings->bindings;
+	for (int row = bind_first_row(screen); row < bind_reset_row(screen); row++) {
+		bindings_set(&ui->settings->bindings, bind_kind(screen), bind_player(ui),
+					 bind_index(screen, row), 0);
+	}
+	ui->bind_all = true;
+	ui->row = bind_first_row(screen);
+	set_capture(ui, p, PLATFORM_CAPTURE_SEQUENCE);
+	prompt_bind(ui);
+}
+
+/* Keeps what was bound so far; the remaining items stay unmapped. */
+static void finish_bind_all(Ui *ui, Platform *p, const char *status) {
+	stop_capture(ui, p);
+	ui->row = bind_all_row(ui->screen);
+	set_status(ui, status, false);
+	save_settings(ui);
+}
+
+static void cancel_bind_all(Ui *ui, Platform *p) {
+	ui->settings->bindings = ui->bind_backup;
+	stop_capture(ui, p);
+	ui->row = bind_all_row(ui->screen);
+	set_status(ui, "Cancelled, nothing changed", false);
+}
+
+static void bind_all_next(Ui *ui, Platform *p) {
+	ui->row++;
+	if (row_is_item(ui->screen, ui->row)) {
+		prompt_bind(ui);
+	} else {
+		finish_bind_all(ui, p, "All binds set");
+	}
+}
+
+static void bind_captured(Ui *ui, Platform *p, const PlatformEvent *ev) {
+	BindKind kind = bind_kind(ui->screen);
+	bool is_gamepad = kind == BIND_GAMEPAD;
+	int index = bind_index(ui->screen, ui->row);
+	char msg[sizeof ui->status];
+
+	/* A key press on the gamepad screen (or the reverse) is not an answer to the prompt. */
+	if ((ev->type == PLATFORM_EV_GAMEPAD_CAPTURED) != is_gamepad) {
 		return;
 	}
-	if (bindings_conflict(&ui->settings->bindings, kind, index, ui->slot, ev->key, msg,
+	if (ev->key == KEY_NONE ||
+		!(is_gamepad ? platform_gamepad_code_valid(ev->key) : platform_key_valid(ev->key))) {
+		return;
+	}
+	if (bindings_conflict(&ui->settings->bindings, kind, bind_player(ui), index, ev->key, msg,
 						  sizeof msg)) {
 		set_status(ui, msg, true);
 		return;
 	}
 
-	bindings_set(&ui->settings->bindings, kind, index, ui->slot, ev->key);
-	stop_capture(ui, p, "Key bound");
+	bindings_set(&ui->settings->bindings, kind, bind_player(ui), index, ev->key);
+	if (ui->bind_all) {
+		bind_all_next(ui, p);
+		return;
+	}
+	stop_capture(ui, p);
+	set_status(ui, is_gamepad ? "Button bound" : "Key bound", false);
 	save_settings(ui);
 }
 
-/* While waiting for a key, only the captured key or ESC matter. Returns true if consumed. */
+/* While waiting for a press only the captured input and the control keys matter. */
 static bool capture_event(Ui *ui, Platform *p, const PlatformEvent *ev) {
 	if (!ui->capturing) {
 		return false;
 	}
-	if (ev->type == PLATFORM_EV_KEY_CAPTURED) {
-		bind_captured_key(ui, p, ev);
-	} else if (ev->type == PLATFORM_EV_BACK) {
-		stop_capture(ui, p, "");
+
+	switch (ev->type) {
+	case PLATFORM_EV_KEY_CAPTURED:
+	case PLATFORM_EV_GAMEPAD_CAPTURED:
+		bind_captured(ui, p, ev);
+		break;
+	case PLATFORM_EV_BACK:
+		if (ui->bind_all) {
+			cancel_bind_all(ui, p);
+		} else {
+			stop_capture(ui, p);
+			set_status(ui, "", false);
+		}
+		break;
+	case PLATFORM_EV_CONFIRM: /* only sent while binding everything */
+		finish_bind_all(ui, p, "Finished, the rest is unmapped");
+		break;
+	case PLATFORM_EV_CLEAR: /* only sent while binding everything */
+		bindings_set(&ui->settings->bindings, bind_kind(ui->screen), bind_player(ui),
+					 bind_index(ui->screen, ui->row), 0);
+		bind_all_next(ui, p);
+		break;
+	default:
+		break;
 	}
 	return true;
 }
 
-static void pad_confirm(Ui *ui, Platform *p) {
-	if (ui->row == PAD_BACK) {
-		go(ui, ui->parent);
-	} else if (ui->row == PAD_RESET) {
-		platform_default_pad(&ui->settings->bindings);
-		set_status(ui, "Defaults restored", false);
-		save_settings(ui);
-	} else {
-		start_capture(ui, p, bindings_pad_label(PAD_ORDER[ui->row]));
+static void reset_binds(Ui *ui) {
+	switch (bind_kind(ui->screen)) {
+	case BIND_GAMEPAD:
+		platform_default_gamepad(&ui->settings->bindings, ui->player);
+		break;
+	case BIND_SHORTCUT:
+		platform_default_shortcuts(&ui->settings->bindings);
+		break;
+	default:
+		platform_default_pad(&ui->settings->bindings, ui->player);
+		break;
 	}
-}
-
-static void pad_clear(Ui *ui) {
-	if (ui->row >= JOY_BTN_COUNT) {
-		return;
-	}
-
-	bindings_set(&ui->settings->bindings, BIND_PAD, PAD_ORDER[ui->row], ui->slot, KEY_NONE);
-	set_status(ui, "Key cleared", false);
+	set_status(ui, "Defaults restored", false);
 	save_settings(ui);
 }
 
-static void shortcut_confirm(Ui *ui, Platform *p) {
-	if (ui->row == SHORTCUT_BACK_ROW) {
+static void bind_confirm(Ui *ui, Platform *p) {
+	if (has_device_row(ui->screen) && ui->row == BIND_ROW_PLAYER) {
+		switch_player(ui);
+	} else if (has_device_row(ui->screen) && ui->row == BIND_ROW_DEVICE) {
+		switch_device(ui);
+	} else if (ui->row == bind_all_row(ui->screen)) {
+		start_bind_all(ui, p);
+	} else if (ui->row == bind_reset_row(ui->screen)) {
+		reset_binds(ui);
+	} else if (ui->row == bind_back_row(ui->screen)) {
 		go(ui, ui->parent);
-	} else if (ui->row == SHORTCUT_RESET_ROW) {
-		platform_default_shortcuts(&ui->settings->bindings);
-		set_status(ui, "Defaults restored", false);
-		save_settings(ui);
 	} else {
-		start_capture(ui, p, bindings_shortcut_label((ShortcutAction)ui->row));
+		start_capture(ui, p);
 	}
 }
 
-static void shortcut_clear(Ui *ui) {
-	if (ui->row >= SC_COUNT) {
+static void bind_clear(Ui *ui) {
+	if (!row_is_item(ui->screen, ui->row)) {
 		return;
 	}
 
-	bindings_set(&ui->settings->bindings, BIND_SHORTCUT, ui->row, 0, KEY_NONE);
-	set_status(ui, "Key cleared", false);
+	bindings_set(&ui->settings->bindings, bind_kind(ui->screen), bind_player(ui),
+				 bind_index(ui->screen, ui->row), 0);
+	set_status(ui, "Cleared", false);
 	save_settings(ui);
 }
 
 /* -- Per-screen events -- */
 
-static void controls_event(Ui *ui, Platform *p, const PlatformEvent *ev) {
-	if (capture_event(ui, p, ev) || list_navigate(ui, ev->type)) {
+static void bind_screen_event(Ui *ui, Platform *p, const PlatformEvent *ev) {
+	if (capture_event(ui, p, ev)) {
+		return;
+	}
+	if (list_navigate(ui, ev->type)) {
 		return;
 	}
 
 	switch (ev->type) {
 	case PLATFORM_EV_LEFT:
 	case PLATFORM_EV_RIGHT:
-		if (ui->row < JOY_BTN_COUNT) {
-			ui->slot ^= 1;
+		if (has_device_row(ui->screen) && ui->row == BIND_ROW_PLAYER) {
+			switch_player(ui);
+		} else if (has_device_row(ui->screen) && ui->row == BIND_ROW_DEVICE) {
+			switch_device(ui);
 		}
 		break;
 	case PLATFORM_EV_CONFIRM:
-		pad_confirm(ui, p);
+		bind_confirm(ui, p);
+		break;
+	case PLATFORM_EV_TEST:
+		if (has_device_row(ui->screen)) {
+			open_pad_test(ui, p);
+		}
+		break;
+	case PLATFORM_EV_KEY:
+		if (has_device_row(ui->screen) && ev->key == platform_test_key()) {
+			open_pad_test(ui, p);
+		}
 		break;
 	case PLATFORM_EV_CLEAR:
-		pad_clear(ui);
-		break;
-	case PLATFORM_EV_BACK:
-		go(ui, ui->parent);
-		break;
-	default:
-		break;
-	}
-}
-
-static void shortcuts_event(Ui *ui, Platform *p, const PlatformEvent *ev) {
-	if (capture_event(ui, p, ev) || list_navigate(ui, ev->type)) {
-		return;
-	}
-
-	switch (ev->type) {
-	case PLATFORM_EV_CONFIRM:
-		shortcut_confirm(ui, p);
-		break;
-	case PLATFORM_EV_CLEAR:
-		shortcut_clear(ui);
+		bind_clear(ui);
 		break;
 	case PLATFORM_EV_BACK:
 		go(ui, ui->parent);
@@ -528,6 +739,9 @@ static void settings_event(Ui *ui, Platform *p, const PlatformEvent *ev) {
 			break;
 		case SET_BOOT_ROM_FILE:
 			open_dialog(ui, p, PLATFORM_DIALOG_BOOT_ROM);
+			break;
+		case SET_PLAYERS:
+			toggle_players(ui);
 			break;
 		case SET_CONTROLS:
 			open_controls(ui);
@@ -621,6 +835,28 @@ static UiAction crash_event(Ui *ui, Platform *p, const PlatformEvent *ev) {
 	return UI_ACTION_NONE;
 }
 
+static void pad_test_event(Ui *ui, Platform *p, const PlatformEvent *ev) {
+	int count = platform_gamepad_count(p);
+
+	switch (ev->type) {
+	case PLATFORM_EV_LEFT:
+	case PLATFORM_EV_RIGHT:
+		if (count > 1) {
+			ui->test_pad =
+				(ui->test_pad + count + (ev->type == PLATFORM_EV_RIGHT ? 1 : -1)) % count;
+		}
+		break;
+	case PLATFORM_EV_CONFIRM:
+	case PLATFORM_EV_BACK:
+	case PLATFORM_EV_GAMEPAD_MENU:
+		platform_capture_input(p, PLATFORM_CAPTURE_OFF);
+		go(ui, ui->prefer_gamepad ? UI_SCREEN_GAMEPAD : UI_SCREEN_KEYBOARD);
+		break;
+	default:
+		break;
+	}
+}
+
 static UiAction dispatch(Ui *ui, Platform *p, const PlatformEvent *ev) {
 	switch (ui->screen) {
 	case UI_SCREEN_MENU:
@@ -635,11 +871,13 @@ static UiAction dispatch(Ui *ui, Platform *p, const PlatformEvent *ev) {
 	case UI_SCREEN_SETTINGS:
 		settings_event(ui, p, ev);
 		break;
-	case UI_SCREEN_CONTROLS:
-		controls_event(ui, p, ev);
-		break;
+	case UI_SCREEN_KEYBOARD:
+	case UI_SCREEN_GAMEPAD:
 	case UI_SCREEN_SHORTCUTS:
-		shortcuts_event(ui, p, ev);
+		bind_screen_event(ui, p, ev);
+		break;
+	case UI_SCREEN_PAD_TEST:
+		pad_test_event(ui, p, ev);
 		break;
 	case UI_SCREEN_CRASH:
 		return crash_event(ui, p, ev);
@@ -697,8 +935,7 @@ static void dialog_failed(Ui *ui) {
 
 /*
  * Moves the cursor to the row under (mx, my). Returns true if the point is on a row;
- * *on_cell tells whether it also hit something clickable (on the controls screen only
- * the key cells are, and the hit key slot is selected).
+ * *on_cell tells whether it also hit something clickable.
  */
 static bool pick_row(Ui *ui, int mx, int my, bool *on_cell) {
 	ListGeom g = geom(ui->screen);
@@ -716,18 +953,6 @@ static bool pick_row(Ui *ui, int mx, int my, bool *on_cell) {
 
 	ui->row = idx;
 	*on_cell = true;
-
-	if (ui->screen == UI_SCREEN_CONTROLS && idx < JOY_BTN_COUNT) {
-		*on_cell = false;
-		for (int s = 0; s < BIND_KEY_SLOTS; s++) {
-			int x = PAD_COL_X + s * (PAD_CELL_W + PAD_CELL_GAP);
-
-			if (mx >= x && mx < x + PAD_CELL_W) {
-				ui->slot = s;
-				*on_cell = true;
-			}
-		}
-	}
 	return true;
 }
 
@@ -782,6 +1007,15 @@ UiAction ui_handle_event(Ui *ui, Platform *p, const PlatformEvent *ev) {
 		}
 		return UI_ACTION_NONE;
 	case PLATFORM_EV_MOUSE_CLICK:
+		if (!ui->capturing && has_device_row(ui->screen)) {
+			int hint = hint_at(HINTS_CONTROLS, COUNT(HINTS_CONTROLS), ev->mx, ev->my);
+
+			if (hint >= 0) {
+				PlatformEvent click = {.type = HINT_EVENTS_CONTROLS[hint]};
+
+				return dispatch(ui, p, &click);
+			}
+		}
 		if (!ui->capturing && pick_row(ui, ev->mx, ev->my, &on_cell) && on_cell) {
 			PlatformEvent confirm = {.type = PLATFORM_EV_CONFIRM};
 
@@ -831,6 +1065,27 @@ static void draw_header(Platform *p, const Theme *t, const char *title) {
 	platform_draw_text(p, HEADER_TITLE_X, HEADER_TITLE_Y, SCALE_TITLE, t->text, title);
 	text_right(p, CONTENT_RIGHT, HEADER_TAG_Y, SCALE_BODY, t->dim, "GBOYC");
 	platform_fill_rect(p, MARGIN_X, HEADER_LINE_Y, CONTENT_W, 2, t->line);
+}
+
+/* Width of one hint: the key cap plus its label. */
+static int hint_w(const Hint *h) {
+	return text_w(h->key, SCALE_CAPTION) + 3 * HINT_KEY_PAD + text_w(h->label, SCALE_CAPTION);
+}
+
+/* Index of the hint under (mx, my), or -1. Same layout as draw_hints. */
+static int hint_at(const Hint *hints, int count, int mx, int my) {
+	int x = MARGIN_X;
+
+	if (my < HINT_Y - HINT_KEY_PAD || my >= HINT_Y - HINT_KEY_PAD + HINT_KEY_H) {
+		return -1;
+	}
+	for (int i = 0; i < count; i++) {
+		if (mx >= x && mx < x + hint_w(&hints[i])) {
+			return i;
+		}
+		x += hint_w(&hints[i]) + HINT_GAP;
+	}
+	return -1;
 }
 
 static void draw_hints(Platform *p, const Theme *t, const Hint *hints, int count) {
@@ -990,8 +1245,13 @@ static void draw_settings(const Ui *ui, Platform *p, const Theme *t) {
 			ellipsize(file, sizeof file, ui->boot_rom_installed ? s->boot_rom_file : "none", 14);
 			value = file;
 			break;
+		case SET_PLAYERS:
+			label = "Players";
+			value = s->players == 2 ? "2 (linked)" : "1";
+			adjustable = true;
+			break;
 		case SET_CONTROLS:
-			label = "Game controls";
+			label = "Controls";
 			value = ">";
 			break;
 		case SET_SHORTCUTS:
@@ -1027,97 +1287,267 @@ static void draw_key_cell(Platform *p, const Theme *t, int x, int y, bool select
 	text_center(p, x + PAD_CELL_W / 2, y + (PAD_ROW_H - BODY_TEXT_H) / 2, SCALE_BODY, fg, name);
 }
 
-static int pad_cell_x(int slot) {
-	return PAD_COL_X + slot * (PAD_CELL_W + PAD_CELL_GAP);
-}
+/* Text for a bound key / gamepad button, or "-" when unbound. */
+static void bind_value_label(BindKind kind, int code, char *out, size_t size) {
+	if (kind == BIND_GAMEPAD) {
+		const char *name = platform_gamepad_button_name(code);
 
-static void draw_pad_row(const Ui *ui, Platform *p, const Theme *t, int row) {
-	ListGeom g = geom(UI_SCREEN_CONTROLS);
-	int y = g.y0 + row * g.pitch;
-	bool selected = row == ui->row;
-
-	if (row >= JOY_BTN_COUNT) {
-		draw_row(p, t, y, g.h, selected, row == PAD_RESET ? "Reset to default" : "Back", NULL,
-				 false);
-		return;
-	}
-
-	JoyButton button = PAD_ORDER[row];
-
-	draw_label_row(p, t, y, g.h, selected, bindings_pad_label(button));
-
-	for (int s = 0; s < BIND_KEY_SLOTS; s++) {
-		char name[16];
-		bool active = selected && s == ui->slot;
-
-		key_label(bindings_get(&ui->settings->bindings, BIND_PAD, (int)button, s), name,
-				  sizeof name);
-		if (ui->capturing && active) {
-			snprintf(name, sizeof name, "...");
-		}
-		draw_key_cell(p, t, pad_cell_x(s), y, selected, active, name);
-	}
-}
-
-static void draw_controls(const Ui *ui, Platform *p, const Theme *t) {
-	draw_header(p, t, "Controls");
-	platform_draw_text(p, MARGIN_X, SUBHEADER_Y, SCALE_CAPTION, t->dim, "Game Boy buttons");
-
-	for (int s = 0; s < BIND_KEY_SLOTS; s++) {
-		char title[8];
-
-		snprintf(title, sizeof title, "KEY %d", s + 1);
-		text_center(p, pad_cell_x(s) + PAD_CELL_W / 2, SUBHEADER_Y, SCALE_CAPTION, t->dim, title);
-	}
-	for (int row = 0; row < PAD_ROWS; row++) {
-		draw_pad_row(ui, p, t, row);
-	}
-
-	draw_status(ui, p, t);
-	if (ui->capturing) {
-		draw_hints(p, t, HINTS_CAPTURE, COUNT(HINTS_CAPTURE));
+		snprintf(out, size, "%s", name ? name : "-");
 	} else {
-		draw_hints(p, t, HINTS_CONTROLS, COUNT(HINTS_CONTROLS));
+		key_label(code, out, size);
 	}
 }
 
-static void draw_shortcut_row(const Ui *ui, Platform *p, const Theme *t, int row) {
-	ListGeom g = geom(UI_SCREEN_SHORTCUTS);
-	int y = g.y0 + row * g.pitch;
-	bool selected = row == ui->row;
-
-	if (row >= SC_COUNT) {
-		draw_row(p, t, y, g.h, selected, row == SHORTCUT_RESET_ROW ? "Reset to default" : "Back",
-				 NULL, false);
-		return;
-	}
-
-	draw_label_row(p, t, y, g.h, selected, bindings_shortcut_label((ShortcutAction)row));
-
+static void draw_bind_cell(const Ui *ui, Platform *p, const Theme *t, int y, int index,
+						   bool selected) {
 	char name[16];
 
-	key_label(bindings_get(&ui->settings->bindings, BIND_SHORTCUT, row, 0), name, sizeof name);
+	bind_value_label(
+		bind_kind(ui->screen),
+		bindings_get(&ui->settings->bindings, bind_kind(ui->screen), bind_player(ui), index), name,
+		sizeof name);
 	if (ui->capturing && selected) {
 		snprintf(name, sizeof name, "...");
 	}
 	draw_key_cell(p, t, SHORTCUT_CELL_X, y, selected, selected, name);
 }
 
-static void draw_shortcuts(const Ui *ui, Platform *p, const Theme *t) {
-	draw_header(p, t, "Shortcuts");
-	platform_draw_text(p, MARGIN_X, SUBHEADER_Y, SCALE_CAPTION, t->dim,
-					   "Emulator actions. State slots: keys 1-9");
+static void draw_bind_row(const Ui *ui, Platform *p, const Theme *t, int row) {
+	UiScreen screen = ui->screen;
+	ListGeom g = geom(screen);
+	int y = g.y0 + row * g.pitch;
+	bool selected = row == ui->row;
 
-	for (int row = 0; row < SHORTCUT_ROWS; row++) {
-		draw_shortcut_row(ui, p, t, row);
+	if (has_device_row(screen) && row == BIND_ROW_PLAYER) {
+		draw_row(p, t, y, g.h, selected, "Player", ui->player ? "Player 2" : "Player 1", true);
+		return;
+	}
+	if (has_device_row(screen) && row == BIND_ROW_DEVICE) {
+		draw_row(p, t, y, g.h, selected, "Device",
+				 screen == UI_SCREEN_GAMEPAD ? "Gamepad" : "Keyboard", true);
+		return;
+	}
+	if (!row_is_item(screen, row)) {
+		const char *label = "Back";
+
+		if (row == bind_all_row(screen)) {
+			label = "Bind all";
+		} else if (row == bind_reset_row(screen)) {
+			label = "Reset to default";
+		}
+		draw_row(p, t, y, g.h, selected, label, NULL, false);
+		return;
 	}
 
-	draw_status(ui, p, t);
-	if (ui->capturing) {
-		draw_hints(p, t, HINTS_CAPTURE, COUNT(HINTS_CAPTURE));
+	int index = bind_index(screen, row);
+
+	draw_label_row(p, t, y, g.h, selected, bind_label(screen, index));
+	draw_bind_cell(ui, p, t, y, index, selected);
+}
+
+static void draw_bind_caption(const Ui *ui, Platform *p, const Theme *t) {
+	char text[64];
+	bool warn = false;
+
+	if (ui->screen == UI_SCREEN_SHORTCUTS) {
+		snprintf(text, sizeof text, "Emulator actions. State slots: keys 1-9");
+	} else if (ui->screen == UI_SCREEN_KEYBOARD) {
+		snprintf(text, sizeof text, "One key per Game Boy button");
 	} else {
-		draw_hints(p, t, HINTS_SHORTCUTS, COUNT(HINTS_SHORTCUTS));
+		const char *name = platform_gamepad_name(p, ui->player);
+
+		if (name) {
+			char shown[32];
+
+			ellipsize(shown, sizeof shown, name, 28);
+			snprintf(text, sizeof text, "Gamepad %d: %s", ui->player + 1, shown);
+		} else {
+			snprintf(text, sizeof text, "No gamepad connected for Player %d", ui->player + 1);
+			warn = true;
+		}
 	}
+	platform_draw_text(p, MARGIN_X, SUBHEADER_Y, SCALE_CAPTION, warn ? t->warn : t->dim, text);
+}
+
+static void draw_bind_hints(const Ui *ui, Platform *p, const Theme *t) {
+	bool button = ui->screen == UI_SCREEN_GAMEPAD;
+
+	if (ui->capturing && ui->bind_all) {
+		const Hint *hints = button ? HINTS_BIND_ALL_BUTTON : HINTS_BIND_ALL_KEY;
+
+		draw_hints(p, t, hints, COUNT(HINTS_BIND_ALL_KEY));
+	} else if (ui->capturing) {
+		draw_hints(p, t, button ? HINTS_CAPTURE_BUTTON : HINTS_CAPTURE_KEY,
+				   COUNT(HINTS_CAPTURE_KEY));
+	} else if (has_device_row(ui->screen)) {
+		draw_hints(p, t, HINTS_CONTROLS, COUNT(HINTS_CONTROLS));
+	} else {
+		draw_hints(p, t, HINTS_BIND, COUNT(HINTS_BIND));
+	}
+}
+
+static void draw_bind_screen(const Ui *ui, Platform *p, const Theme *t) {
+	draw_header(p, t, ui->screen == UI_SCREEN_SHORTCUTS ? "Shortcuts" : "Controls");
+	draw_bind_caption(ui, p, t);
+	for (int row = 0; row < bind_row_count(ui->screen); row++) {
+		draw_bind_row(ui, p, t, row);
+	}
+	draw_status(ui, p, t);
+	draw_bind_hints(ui, p, t);
+}
+
+/* A small labelled tag that lights up while the button is held. */
+static void draw_chip(Platform *p, const Theme *t, int x, int y, bool on, const char *label) {
+	fill_card(p, x, y, TEST_CHIP_W, TEST_CHIP_H, on ? t->accent : t->surface);
+	text_center(p, x + TEST_CHIP_W / 2, y + (TEST_CHIP_H - PLATFORM_GLYPH_H) / 2, SCALE_CAPTION,
+				on ? t->on_accent : t->dim, label);
+}
+
+/* "N", "SE", ... for a direction past the dead zone; "-" when centred. */
+static const char *compass(int x, int y) {
+	static const char *const NAMES[3][3] = {{"NW", "N", "NE"}, {"W", "-", "E"}, {"SW", "S", "SE"}};
+	int cx = x > PLATFORM_STICK_DEADZONE ? 2 : (x < -PLATFORM_STICK_DEADZONE ? 0 : 1);
+	int cy = y > PLATFORM_STICK_DEADZONE ? 2 : (y < -PLATFORM_STICK_DEADZONE ? 0 : 1);
+
+	return NAMES[cy][cx];
+}
+
+/*
+ * A square with a dot that follows the input (-32768..32767 on both axes). The darker inner
+ * square is the dead zone: the dot only turns bright once the direction counts.
+ */
+static void draw_direction_box(Platform *p, const Theme *t, int bx, const char *title, int x,
+							   int y) {
+	int s = TEST_BOX_SIZE;
+	int dead = s * PLATFORM_STICK_DEADZONE / 32768;
+	int reach = (s - TEST_DOT) / 2;
+	int cx = bx + s / 2;
+	int cy = TEST_BOX_Y + s / 2;
+	bool active = compass(x, y)[0] != '-';
+	char text[32];
+
+	text_center(p, cx, TEST_TITLE_Y, SCALE_CAPTION, t->dim, title);
+	fill_card(p, bx, TEST_BOX_Y, s, s, t->surface);
+	platform_fill_rect(p, cx - dead / 2, cy - dead / 2, dead, dead, t->bg);
+	platform_fill_rect(p, bx + 6, cy - 1, s - 12, 2, t->line);
+	platform_fill_rect(p, cx - 1, TEST_BOX_Y + 6, 2, s - 12, t->line);
+	platform_fill_rect(p, cx + x * reach / 32768 - TEST_DOT / 2,
+					   cy + y * reach / 32768 - TEST_DOT / 2, TEST_DOT, TEST_DOT,
+					   active ? t->accent : t->dim);
+
+	text_center(p, cx, TEST_READ_Y, SCALE_BODY, active ? t->text : t->dim, compass(x, y));
+	snprintf(text, sizeof text, "x %+.2f  y %+.2f", x / 32768.0, y / 32768.0);
+	text_center(p, cx, TEST_VALUES_Y, SCALE_CAPTION, t->dim, text);
+}
+
+/* The front of a Game Boy: each control lights up while the emulator reads it as pressed. */
+static void draw_gb_diagram(Platform *p, const Theme *t, int x, int y, uint8_t mask) {
+	const int arm = 22;
+	int cx = x + 52;
+	int cy = y + 44;
+	uint32_t off = t->line;
+	uint32_t on = t->accent;
+
+	fill_card(p, x, y, TEST_GB_W, TEST_GB_H, t->surface);
+	platform_fill_rect(p, cx - arm / 2, cy - arm / 2, arm, arm, off);
+	platform_fill_rect(p, cx - arm / 2, cy - arm - arm / 2, arm, arm,
+					   mask & JOY_MASK(JOY_BTN_UP) ? on : off);
+	platform_fill_rect(p, cx - arm / 2, cy + arm / 2, arm, arm,
+					   mask & JOY_MASK(JOY_BTN_DOWN) ? on : off);
+	platform_fill_rect(p, cx - arm - arm / 2, cy - arm / 2, arm, arm,
+					   mask & JOY_MASK(JOY_BTN_LEFT) ? on : off);
+	platform_fill_rect(p, cx + arm / 2, cy - arm / 2, arm, arm,
+					   mask & JOY_MASK(JOY_BTN_RIGHT) ? on : off);
+
+	fill_card(p, x + 154, y + 48, 32, 32, mask & JOY_MASK(JOY_BTN_B) ? on : off);
+	text_center(p, x + 170, y + 60, SCALE_BODY, mask & JOY_MASK(JOY_BTN_B) ? t->on_accent : t->dim,
+				"B");
+	fill_card(p, x + 194, y + 28, 32, 32, mask & JOY_MASK(JOY_BTN_A) ? on : off);
+	text_center(p, x + 210, y + 40, SCALE_BODY, mask & JOY_MASK(JOY_BTN_A) ? t->on_accent : t->dim,
+				"A");
+
+	fill_card(p, x + 64, y + 80, 52, 14, mask & JOY_MASK(JOY_BTN_SELECT) ? on : off);
+	text_center(p, x + 90, y + 83, SCALE_CAPTION,
+				mask & JOY_MASK(JOY_BTN_SELECT) ? t->on_accent : t->dim, "SELECT");
+	fill_card(p, x + 124, y + 80, 52, 14, mask & JOY_MASK(JOY_BTN_START) ? on : off);
+	text_center(p, x + 150, y + 83, SCALE_CAPTION,
+				mask & JOY_MASK(JOY_BTN_START) ? t->on_accent : t->dim, "START");
+}
+
+static void draw_pad_test(const Ui *ui, Platform *p, const Theme *t) {
+	ListGeom g = geom(UI_SCREEN_PAD_TEST);
+	int count = platform_gamepad_count(p);
+	int pad = count ? ui->test_pad % count : 0;
+	PlatformPadState st;
+	char text[64];
+
+	draw_header(p, t, "Test controller");
+
+	if (!platform_gamepad_state(p, pad, &st)) {
+		platform_draw_text(p, MARGIN_X, SUBHEADER_Y, SCALE_CAPTION, t->warn,
+						   "No gamepad detected. Plug one in and it shows up here.");
+	} else {
+		/* Shown in this order; a trigger (axis >= 0) counts as pressed past a threshold. */
+		static const struct {
+			int button;
+			int axis;
+			const char *name;
+		} CHIPS[] = {
+			{PLATFORM_BTN_NORTH, -1, "North"},
+			{PLATFORM_BTN_SOUTH, -1, "South"},
+			{PLATFORM_BTN_WEST, -1, "West"},
+			{PLATFORM_BTN_EAST, -1, "East"},
+			{PLATFORM_BTN_BACK, -1, "Select"},
+			{PLATFORM_BTN_START, -1, "Start"},
+			{PLATFORM_BTN_GUIDE, -1, "Guide"},
+			{PLATFORM_BTN_LEFT_BUMPER, -1, "L-Bumper"},
+			{PLATFORM_BTN_RIGHT_BUMPER, -1, "R-Bumper"},
+			{0, PLATFORM_AXIS_LEFT_TRIGGER, "L-Trigger"},
+			{0, PLATFORM_AXIS_RIGHT_TRIGGER, "R-Trigger"},
+			{PLATFORM_BTN_LEFT_STICK, -1, "L-Stick"},
+			{PLATFORM_BTN_RIGHT_STICK, -1, "R-Stick"},
+		};
+		int players = ui->settings->players;
+		int player = players == 2 ? pad : 0;
+		int gap = (CONTENT_W - TEST_BOX_COUNT * TEST_BOX_SIZE) / (TEST_BOX_COUNT - 1);
+		int dx = (st.buttons >> PLATFORM_BTN_DPAD_RIGHT & 1) -
+				 (st.buttons >> PLATFORM_BTN_DPAD_LEFT & 1);
+		int dy =
+			(st.buttons >> PLATFORM_BTN_DPAD_DOWN & 1) - (st.buttons >> PLATFORM_BTN_DPAD_UP & 1);
+		char shown[32];
+
+		ellipsize(shown, sizeof shown, platform_gamepad_name(p, pad), 28);
+		snprintf(text, sizeof text, "Gamepad %d of %d: %s", pad + 1, count, shown);
+		platform_draw_text(p, MARGIN_X, SUBHEADER_Y, SCALE_CAPTION, t->dim, text);
+
+		draw_direction_box(p, t, MARGIN_X, "D-PAD", dx * 32767, dy * 32767);
+		draw_direction_box(p, t, MARGIN_X + TEST_BOX_SIZE + gap, "LEFT STICK",
+						   st.axes[PLATFORM_AXIS_LEFT_X], st.axes[PLATFORM_AXIS_LEFT_Y]);
+		draw_direction_box(p, t, MARGIN_X + 2 * (TEST_BOX_SIZE + gap), "RIGHT STICK",
+						   st.axes[PLATFORM_AXIS_RIGHT_X], st.axes[PLATFORM_AXIS_RIGHT_Y]);
+
+		if (players == 2 && pad >= MAX_PLAYERS) {
+			snprintf(text, sizeof text, "EMULATOR INPUT: NOT USED WITH 2 PLAYERS");
+		} else {
+			snprintf(text, sizeof text, "EMULATOR INPUT: PLAYER %d", player + 1);
+		}
+		platform_draw_text(p, MARGIN_X, TEST_LOWER_Y, SCALE_CAPTION, t->dim, text);
+		draw_gb_diagram(p, t, MARGIN_X, TEST_GB_Y,
+						platform_joypad(p, &ui->settings->bindings, player, players));
+
+		platform_draw_text(p, TEST_CHIP_X, TEST_LOWER_Y, SCALE_CAPTION, t->dim, "BUTTONS");
+		for (int i = 0; i < COUNT(CHIPS); i++) {
+			bool down = CHIPS[i].axis >= 0 ? st.axes[CHIPS[i].axis] > PLATFORM_TRIGGER_PRESSED
+										   : (st.buttons >> CHIPS[i].button) & 1;
+
+			draw_chip(p, t, TEST_CHIP_X + (i % TEST_CHIP_COLS) * (TEST_CHIP_W + TEST_CHIP_GAP),
+					  TEST_GB_Y + (i / TEST_CHIP_COLS) * TEST_CHIP_PITCH, down, CHIPS[i].name);
+		}
+	}
+
+	draw_row(p, t, g.y0, g.h, true, "Back", NULL, false);
+	draw_status(ui, p, t);
+	draw_hints(p, t, HINTS_PAD_TEST, COUNT(HINTS_PAD_TEST));
 }
 
 void ui_draw(const Ui *ui, Platform *p) {
@@ -1144,11 +1574,13 @@ void ui_draw(const Ui *ui, Platform *p) {
 	case UI_SCREEN_SETTINGS:
 		draw_settings(ui, p, t);
 		break;
-	case UI_SCREEN_CONTROLS:
-		draw_controls(ui, p, t);
-		break;
+	case UI_SCREEN_KEYBOARD:
+	case UI_SCREEN_GAMEPAD:
 	case UI_SCREEN_SHORTCUTS:
-		draw_shortcuts(ui, p, t);
+		draw_bind_screen(ui, p, t);
+		break;
+	case UI_SCREEN_PAD_TEST:
+		draw_pad_test(ui, p, t);
 		break;
 	case UI_SCREEN_CRASH:
 		draw_crash(ui, p, t);
