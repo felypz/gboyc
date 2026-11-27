@@ -366,6 +366,28 @@ const char *cartridge_title(const Cartridge *c) {
 	return c->title;
 }
 
+void cartridge_info(const Cartridge *c, CartridgeInfo *out) {
+	uint8_t sum = 0;
+
+	memset(out, 0, sizeof *out);
+	snprintf(out->title, sizeof out->title, "%s", c->title);
+	snprintf(out->mapper, sizeof out->mapper, "%s%s%s%s", MBC_NAMES[c->map.type],
+			 c->map.multicart ? ", multicart" : "", c->map.has_timer ? " + RTC" : "",
+			 c->map.rumble ? " + rumble" : "");
+	out->rom_kib = (unsigned)(c->rom_size / 1024);
+	out->ram_bytes = (unsigned)c->ram_size;
+	out->battery = c->battery;
+	if (c->rom_size >= 0x150) {
+		for (size_t i = 0x134; i <= 0x14C; i++) {
+			sum = (uint8_t)(sum - c->rom[i] - 1);
+		}
+		out->header_ok = sum == c->rom[0x14D];
+		out->cgb = c->rom[0x143] & 0x80;
+		out->version = c->rom[0x14C];
+		out->global_checksum = (uint16_t)((c->rom[0x14E] << 8) | c->rom[0x14F]);
+	}
+}
+
 void cartridge_log_info(const Cartridge *c) {
 	log_verbose("Cartridge: %s", c->title[0] ? c->title : "(untitled)");
 	log_verbose("Mapper: %s%s%s%s%s", MBC_NAMES[c->map.type], c->map.multicart ? ", multicart" : "",

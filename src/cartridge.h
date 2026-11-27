@@ -34,6 +34,19 @@ bool cartridge_state_restore(Cartridge *c, const uint8_t *in, size_t size);
 /* Restores a user-loaded state: validates, then marks battery RAM dirty so it gets flushed. */
 bool cartridge_state_load(Cartridge *c, const uint8_t *in, size_t size);
 
+typedef struct {
+	char title[17];
+	char mapper[40];
+	unsigned rom_kib;
+	unsigned ram_bytes;
+	bool battery;
+	bool cgb;				  /* header says the game has Game Boy Color features */
+	bool header_ok;			  /* header checksum (0x14D) matches */
+	uint8_t version;		  /* mask ROM version number */
+	uint16_t global_checksum; /* as stored in the header; the hardware never checks it */
+} CartridgeInfo;
+
+void cartridge_info(const Cartridge *c, CartridgeInfo *out);
 void cartridge_log_info(const Cartridge *c);
 
 #endif
