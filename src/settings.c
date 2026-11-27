@@ -1,6 +1,7 @@
 #include "settings.h"
 
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "file_util.h"
@@ -16,6 +17,11 @@ void settings_defaults(Settings *s) {
 	snprintf(s->boot_rom_file, sizeof s->boot_rom_file, "%s", DEFAULT_BOOT_ROM_FILE);
 	s->theme = THEME_AUTO;
 	s->players = 1;
+	s->palette = PALETTE_CLASSIC;
+	s->ghosting = GHOST_OFF;
+	s->turbo = SETTINGS_TURBO_MIN;
+	s->volume = SETTINGS_VOLUME_MAX;
+	s->channels = SETTINGS_ALL_CHANNELS;
 	platform_default_shortcuts(&s->bindings);
 	for (int player = 0; player < MAX_PLAYERS; player++) {
 		platform_default_pad(&s->bindings, player);
@@ -29,6 +35,10 @@ static bool valid_file_name(const char *name) {
 
 	return len > 0 && len < SETTINGS_NAME_MAX && name[0] != '.' && !strchr(name, '/') &&
 		   !strchr(name, '\\');
+}
+
+static int clamp_int(int v, int lo, int hi) {
+	return v < lo ? lo : (v > hi ? hi : v);
 }
 
 static void parse_line(Settings *s, char *line) {
@@ -54,6 +64,18 @@ static void parse_line(Settings *s, char *line) {
 		s->theme = theme_mode_parse(value);
 	} else if (strcmp(name, "players") == 0) {
 		s->players = strcmp(value, "2") == 0 ? 2 : 1;
+	} else if (strcmp(name, "palette") == 0) {
+		s->palette = palette_parse(value);
+	} else if (strcmp(name, "ghosting") == 0) {
+		s->ghosting = ghosting_parse(value);
+	} else if (strcmp(name, "filter") == 0) {
+		s->smooth = strcmp(value, "smooth") == 0;
+	} else if (strcmp(name, "turbo") == 0) {
+		s->turbo = clamp_int(atoi(value), SETTINGS_TURBO_MIN, SETTINGS_TURBO_MAX);
+	} else if (strcmp(name, "volume") == 0) {
+		s->volume = clamp_int(atoi(value), 0, SETTINGS_VOLUME_MAX);
+	} else if (strcmp(name, "channels") == 0) {
+		s->channels = (unsigned)atoi(value) & SETTINGS_ALL_CHANNELS;
 	} else {
 		bindings_parse(&s->bindings, name, value);
 	}
@@ -95,6 +117,9 @@ bool settings_save(const Settings *s) {
 	fprintf(out.file, "boot_rom=%s\nboot_rom_file=%s\ntheme=%s\nplayers=%d\n",
 			s->boot_rom_enabled ? "on" : "off", s->boot_rom_file, theme_mode_key(s->theme),
 			s->players);
+	fprintf(out.file, "palette=%s\nghosting=%s\nfilter=%s\nturbo=%d\nvolume=%d\nchannels=%u\n",
+			palette_key(s->palette), ghosting_key(s->ghosting), s->smooth ? "smooth" : "sharp",
+			s->turbo, s->volume, s->channels);
 	bindings_write(&s->bindings, out.file);
 	return atomic_file_commit(&out);
 }
