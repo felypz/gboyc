@@ -28,7 +28,7 @@ static const Name PAD_NAMES[JOY_BTN_COUNT] = {
 
 static const Name SHORTCUT_NAMES[SC_COUNT] = {
 	[SC_PAUSE] = {"Pause", "pause"},
-	[SC_SPEED] = {"Speed 2x", "speed"},
+	[SC_SPEED] = {"Turbo", "speed"},
 	[SC_RESET] = {"Reset", "reset"},
 	[SC_SAVE_STATE] = {"Save state", "save"},
 	[SC_LOAD_STATE] = {"Load state", "load"},
