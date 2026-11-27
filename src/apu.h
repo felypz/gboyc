@@ -49,6 +49,7 @@ typedef struct {
 	uint32_t left_sum;
 	uint32_t right_sum;
 	uint32_t sum_count;
+	uint8_t mute; /* bit i set = channel i is silenced (a user setting, not emulated state) */
 	uint32_t sample_acc;
 	float left_cap;
 	float right_cap;

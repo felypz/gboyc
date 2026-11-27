@@ -245,7 +245,7 @@ static void mix(Apu *a) {
 	unsigned right = 0;
 
 	for (ApuChannelId i = 0; i < CH_COUNT; i++) {
-		unsigned level = output(a, i);
+		unsigned level = (a->mute >> i) & 1 ? 0 : output(a, i);
 
 		if (pan & (1u << i)) {
 			right += level;
