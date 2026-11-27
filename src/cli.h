@@ -3,10 +3,6 @@
 
 #include <stdbool.h>
 
-#ifndef GBOYC_VERSION
-#define GBOYC_VERSION "0.1.0"
-#endif
-
 /* Failures that --crash-test can inject, to exercise the crash screens. */
 typedef enum {
 	CRASH_TEST_NONE,

@@ -6,6 +6,7 @@
 #include <string.h>
 
 #include "paths.h"
+#include "version.h"
 
 #define SCALE_MIN	  1
 #define SCALE_MAX	  10
