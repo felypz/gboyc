@@ -9,19 +9,21 @@
 #include "cartridge.h"
 #include "cli.h"
 #include "crash.h"
+#include "display.h"
 #include "gb.h"
 #include "guard.h"
 #include "log.h"
 #include "paths.h"
 #include "platform.h"
+#include "recent.h"
 #include "settings.h"
 #include "state.h"
 #include "stepper.h"
 #include "ui.h"
+#include "version.h"
 
 #define AUTOSAVE_FRAMES	  300 /* battery RAM is flushed every 5 s at 60 fps */
 #define OSD_FRAMES		  90
-#define FAST_SPEED		  2
 #define STATS_INTERVAL_MS 1000
 #define CRASH_TEST_FRAME  60 /* frame (after loading the ROM) at which --crash-test fires */
 #define COLOR_BLACK		  0xFF000000U
@@ -57,6 +59,7 @@ typedef struct {
 	Ui ui;
 
 	Gb gb;
+	Display display[MAX_PLAYERS];
 	Gb gb2; /* second console of a linked pair; only valid while linked */
 	bool linked;
 	Stepper stepper;
@@ -221,6 +224,9 @@ static bool start_game(App *a, const char *path) {
 	a->speed = 1;
 	a->slot = 1;
 	a->frames = 0;
+	display_reset(&a->display[0]);
+	display_reset(&a->display[1]);
+	recent_add(path);
 	a->osd_frames = 0;
 	clear_crash(a);
 	log_info("ROM loaded: %s", cartridge_title(a->cart));
@@ -251,8 +257,11 @@ static void enter_game(App *a) {
 }
 
 static void open_menu(App *a) {
+	CartridgeInfo info;
+
 	a->menu_open = true;
-	ui_open_pause(&a->ui);
+	cartridge_info(a->cart, &info);
+	ui_open_pause(&a->ui, &info, a->rom_path);
 	platform_audio_clear(a->plat);
 	log_verbose("Pause menu opened");
 }
@@ -295,9 +304,24 @@ static void push_audio(App *a) {
 		gb_take_audio(&a->gb2, &unused);
 	}
 
-	if (a->speed == 1) {
-		platform_audio_push(a->plat, samples, frames);
+	if (a->speed != 1) {
+		return;
 	}
+	if (a->settings.volume >= SETTINGS_VOLUME_MAX) {
+		platform_audio_push(a->plat, samples, frames);
+		return;
+	}
+
+	static float scaled[APU_BUFFER_FRAMES * 2];
+	float gain = (float)a->settings.volume / SETTINGS_VOLUME_MAX;
+
+	if (frames > APU_BUFFER_FRAMES) {
+		frames = APU_BUFFER_FRAMES;
+	}
+	for (size_t i = 0; i < frames * 2; i++) {
+		scaled[i] = samples[i] * gain;
+	}
+	platform_audio_push(a->plat, scaled, frames);
 }
 
 /* -- Crashes -- */
@@ -492,7 +516,7 @@ static void handle_shortcut(App *a, ShortcutAction action) {
 		toggle_pause(a);
 		break;
 	case SC_SPEED:
-		a->speed = (a->speed == 1) ? FAST_SPEED : 1;
+		a->speed = (a->speed == 1) ? a->settings.turbo : 1;
 		platform_audio_clear(a->plat);
 		osd_show(a, "Speed %dx", a->speed);
 		break;
@@ -604,7 +628,7 @@ static bool handle_ui_event(App *a, const PlatformEvent *ev) {
 	}
 	if (ev->type == PLATFORM_EV_GAMEPAD_BUTTON) {
 		/* Menus are driven with the D-pad (and face buttons) like with the arrow keys. */
-		if (!platform_gamepad_nav(ev->key, &nav.type)) {
+		if (!platform_gamepad_nav(&a->settings.bindings, ev->key, &nav.type)) {
 			return true;
 		}
 		ev = &nav;
@@ -617,10 +641,17 @@ static bool handle_ui_event(App *a, const PlatformEvent *ev) {
 		if (start_game(a, ui_selected_rom(&a->ui))) {
 			enter_game(a);
 		} else {
+			recent_remove(ui_selected_rom(&a->ui));
 			ui_notify(&a->ui, "Invalid or unsupported ROM", true);
 		}
 		break;
+	case UI_ACTION_SAVE_STATE:
+		a->slot = ui_take_slot(&a->ui, a->slot);
+		save_state(a);
+		close_menu(a);
+		break;
 	case UI_ACTION_LOAD_STATE:
+		a->slot = ui_take_slot(&a->ui, a->slot);
 		if (load_state(a)) {
 			close_menu(a);
 		} else {
@@ -718,6 +749,8 @@ static void run_emulation(App *a) {
 	if (a->linked) {
 		gb_set_joypad(&a->gb2, platform_joypad(a->plat, &a->settings.bindings, 1, players));
 	}
+	a->gb.apu.mute = (uint8_t)(~a->settings.channels & SETTINGS_ALL_CHANNELS);
+	a->gb2.apu.mute = a->gb.apu.mute;
 	if (!guard_run(frame_job, &job)) {
 		enter_emulator_fault(a);
 		return;
@@ -756,10 +789,18 @@ static void draw(App *a) {
 		stats_reset(a);
 	}
 	platform_set_background(a->plat, COLOR_BLACK);
+	platform_set_smooth(a->plat, a->settings.smooth);
+
+	const Settings *s = &a->settings;
+	const uint32_t *left =
+		display_process(&a->display[0], gb_framebuffer(&a->gb), s->palette, s->ghosting);
+
 	if (a->linked) {
-		platform_draw_frames(a->plat, gb_framebuffer(&a->gb), gb_framebuffer(&a->gb2));
+		platform_draw_frames(
+			a->plat, left,
+			display_process(&a->display[1], gb_framebuffer(&a->gb2), s->palette, s->ghosting));
 	} else {
-		platform_draw_frame(a->plat, gb_framebuffer(&a->gb));
+		platform_draw_frame(a->plat, left);
 	}
 	if (a->menu_open) {
 		ui_draw(&a->ui, a->plat);
@@ -826,6 +867,7 @@ int main(int argc, char **argv) {
 	log_set_verbose(app.cli.verbose);
 	guard_install();
 	settings_load(&app.settings);
+	recent_load();
 	log_startup(&app);
 
 	if (!load_boot_override(&app)) {
@@ -863,6 +905,7 @@ int main(int argc, char **argv) {
 		}
 
 		update_cursor(&app);
+		platform_set_nav(app.plat, &app.settings.bindings, menu_has_focus(&app));
 		draw(&app);
 		platform_flip(app.plat);
 		platform_frame_limit(app.plat);
