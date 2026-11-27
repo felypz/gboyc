@@ -1,30 +1,32 @@
-CC      ?= gcc
-TARGET  := gboyc
-SRCS    := $(wildcard src/*.c)
-OBJS    := $(SRCS:src/%.c=build/%.o)
+PROGRAM = gboyc
+CC = cc
+CFLAGS = -O2
+LDFLAGS =
+PREFIX = /usr/local
+DESTDIR =
 
-CFLAGS  := -std=c11 -Wall -Wextra -Wpedantic -O2 -g -MMD -MP $(shell pkg-config --cflags sdl3)
-LDLIBS  := $(shell pkg-config --libs sdl3)
+all:
+	mkdir -p build
+	{ echo 'const unsigned char LICENSE_TEXT[] = {'; \
+	od -An -v -tx1 LICENSE | sed -e 's/^ *//' -e 's/ /,0x/g' -e 's/^/0x/' -e 's/$$/,/'; \
+	echo '0};'; \
+	echo 'const unsigned long LICENSE_SIZE = sizeof LICENSE_TEXT - 1;'; } > build/license_text.c
+	$(CC) -std=c11 -Wall -Wextra -Wpedantic $(CFLAGS) `pkg-config --cflags sdl3` \
+		src/*.c build/license_text.c $(LDFLAGS) -o $(PROGRAM) `pkg-config --libs sdl3`
 
-all: $(TARGET)
+debug:
+	$(MAKE) CFLAGS="-O0 -g3 -fsanitize=address,undefined" \
+		LDFLAGS="-fsanitize=address,undefined" all
 
-$(TARGET): $(OBJS)
-	$(CC) $^ $(LDLIBS) -o $@
+install: all
+	mkdir -p $(DESTDIR)$(PREFIX)/bin
+	cp -f $(PROGRAM) $(DESTDIR)$(PREFIX)/bin/
+	chmod 755 $(DESTDIR)$(PREFIX)/bin/$(PROGRAM)
 
-build/%.o: src/%.c | build
-	$(CC) $(CFLAGS) -c $< -o $@
-
-build config/boot:
-	mkdir -p $@
-
-format:
-	clang-format -i src/*.c src/*.h
-
-check-format:
-	clang-format --dry-run --Werror src/*.c src/*.h
+uninstall:
+	rm -f $(DESTDIR)$(PREFIX)/bin/$(PROGRAM)
 
 clean:
-	rm -rf build $(TARGET)
+	rm -rf build $(PROGRAM)
 
-.PHONY: all format check-format clean
--include $(OBJS:.o=.d)
+.PHONY: all debug install uninstall clean
