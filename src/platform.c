@@ -30,6 +30,9 @@ enum { DIALOG_CHOSEN, DIALOG_CANCELED, DIALOG_FAILED };
 struct Platform {
 	SDL_Window *window;
 	SDL_Renderer *renderer;
+	bool smooth;
+	const Bindings *nav_bindings;			 /* menus follow these keyboard binds */
+	bool menu_focus;						 /* a menu (not the game) receives the keys */
 	SDL_Texture *frame_texture[MAX_PLAYERS]; /* PPU_W x PPU_H, streamed from a framebuffer */
 	SDL_Texture *ui_target; /* UI_VIEW_W x UI_VIEW_H, everything is drawn here first */
 	SDL_AudioStream *audio;
@@ -257,7 +260,36 @@ const char *platform_gamepad_button_name(int code) {
 	return BUTTON_NAMES[code - 1];
 }
 
-bool platform_gamepad_nav(int code, PlatformEventType *nav) {
+/*
+ * Menu navigation from the player 1 gamepad binds: the direction buttons move, A and Start
+ * confirm, B goes back. Buttons that are not bound to anything keep a built-in role (D-pad,
+ * South, East, Back, West = clear, North = test), so the menus are reachable whatever is bound.
+ */
+bool platform_gamepad_nav(const Bindings *b, int code, PlatformEventType *nav) {
+	static const struct {
+		JoyButton button;
+		PlatformEventType nav;
+	} BOUND[] = {
+		{JOY_BTN_UP, PLATFORM_EV_UP},	  {JOY_BTN_DOWN, PLATFORM_EV_DOWN},
+		{JOY_BTN_LEFT, PLATFORM_EV_LEFT}, {JOY_BTN_RIGHT, PLATFORM_EV_RIGHT},
+		{JOY_BTN_A, PLATFORM_EV_CONFIRM}, {JOY_BTN_START, PLATFORM_EV_CONFIRM},
+		{JOY_BTN_B, PLATFORM_EV_BACK},
+	};
+	bool is_bound = false;
+
+	for (size_t i = 0; i < sizeof BOUND / sizeof *BOUND; i++) {
+		if (b->gamepad[0][BOUND[i].button] == code) {
+			*nav = BOUND[i].nav;
+			return true;
+		}
+	}
+	for (int i = 0; i < JOY_BTN_COUNT; i++) {
+		is_bound = is_bound || b->gamepad[0][i] == code;
+	}
+	if (is_bound) {
+		return false;
+	}
+
 	switch ((SDL_GamepadButton)(code - 1)) {
 	case SDL_GAMEPAD_BUTTON_DPAD_UP:
 		*nav = PLATFORM_EV_UP;
@@ -386,7 +418,9 @@ void platform_set_background(Platform *p, uint32_t argb) {
 	p->background = argb;
 }
 
-static PlatformEventType map_nav(SDL_Keycode key) {
+/* Menu keys: the arrows, ENTER, ESC and DEL always work; while a menu has focus the keyboard
+ * binds of every player also navigate (directions move, A / Start confirm, B goes back). */
+static PlatformEventType map_nav(const Platform *p, SDL_Keycode key, SDL_Scancode scancode) {
 	switch (key) {
 	case SDLK_UP:
 		return PLATFORM_EV_UP;
@@ -405,8 +439,42 @@ static PlatformEventType map_nav(SDL_Keycode key) {
 	case SDLK_DELETE:
 		return PLATFORM_EV_CLEAR;
 	default:
+		break;
+	}
+	if (!p->menu_focus || !p->nav_bindings) {
 		return PLATFORM_EV_KEY;
 	}
+	for (int player = 0; player < MAX_PLAYERS; player++) {
+		const int *pad = p->nav_bindings->pad[player];
+
+		if ((int)scancode == KEY_NONE) {
+			break;
+		}
+		if (pad[JOY_BTN_UP] == (int)scancode) {
+			return PLATFORM_EV_UP;
+		}
+		if (pad[JOY_BTN_DOWN] == (int)scancode) {
+			return PLATFORM_EV_DOWN;
+		}
+		if (pad[JOY_BTN_LEFT] == (int)scancode) {
+			return PLATFORM_EV_LEFT;
+		}
+		if (pad[JOY_BTN_RIGHT] == (int)scancode) {
+			return PLATFORM_EV_RIGHT;
+		}
+		if (pad[JOY_BTN_A] == (int)scancode || pad[JOY_BTN_START] == (int)scancode) {
+			return PLATFORM_EV_CONFIRM;
+		}
+		if (pad[JOY_BTN_B] == (int)scancode) {
+			return PLATFORM_EV_BACK;
+		}
+	}
+	return PLATFORM_EV_KEY;
+}
+
+void platform_set_nav(Platform *p, const Bindings *bindings, bool menu_focus) {
+	p->nav_bindings = bindings;
+	p->menu_focus = menu_focus;
 }
 
 /* Event for a key pressed while capturing: ESC always cancels, bind-all adds ENTER and DEL. */
@@ -497,7 +565,7 @@ bool platform_next_event(Platform *p, PlatformEvent *out) {
 				out->type = capture_type(p->capture, ev.key.key);
 				return true;
 			}
-			out->type = map_nav(ev.key.key);
+			out->type = map_nav(p, ev.key.key, ev.key.scancode);
 			return true;
 		case SDL_EVENT_GAMEPAD_ADDED:
 			if (gamepad_add(p, ev.gdevice.which, out)) {
@@ -616,6 +684,23 @@ const char *platform_key_name(int scancode) {
 }
 
 /* KEY_NONE (an unbound slot) counts as valid: it is what unbinding stores. */
+void platform_open_url(const char *url) {
+	SDL_OpenURL(url);
+}
+
+void platform_set_smooth(Platform *p, bool smooth) {
+	if (p->smooth == smooth) {
+		return;
+	}
+	p->smooth = smooth;
+	for (int i = 0; i < MAX_PLAYERS; i++) {
+		if (p->frame_texture[i]) {
+			SDL_SetTextureScaleMode(p->frame_texture[i],
+									smooth ? SDL_SCALEMODE_LINEAR : SDL_SCALEMODE_NEAREST);
+		}
+	}
+}
+
 int platform_test_key(void) {
 	return SDL_SCANCODE_F1;
 }

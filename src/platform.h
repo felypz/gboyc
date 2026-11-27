@@ -88,6 +88,10 @@ const char *platform_key_name(int scancode);
 bool platform_key_valid(int scancode);
 /* Scancode of the key that opens the controller test (sent as a plain PLATFORM_EV_KEY). */
 int platform_test_key(void);
+/* Opens a web address or folder with the desktop handler. */
+void platform_open_url(const char *url);
+/* Bilinear (true) or sharp (false) scaling of the game picture. */
+void platform_set_smooth(Platform *p, bool smooth);
 bool platform_key_reserved(int scancode);
 int platform_slot_for_key(int scancode);
 void platform_capture_input(Platform *p, PlatformCapture mode);
@@ -96,7 +100,9 @@ void platform_capture_input(Platform *p, PlatformCapture mode);
 const char *platform_gamepad_button_name(int code);
 bool platform_gamepad_code_valid(int code);
 /* Menu navigation for a gamepad button; returns false if the button has none. */
-bool platform_gamepad_nav(int code, PlatformEventType *nav);
+bool platform_gamepad_nav(const Bindings *bindings, int code, PlatformEventType *nav);
+/* Tells the platform which binds drive the menus and whether a menu has the focus. */
+void platform_set_nav(Platform *p, const Bindings *bindings, bool menu_focus);
 int platform_gamepad_count(const Platform *p);
 /* Raw state of the Nth connected gamepad, for the controller test screen. */
 /* Bit numbers of PlatformPadState.buttons (the buttons every pad has). */
