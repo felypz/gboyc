@@ -4,6 +4,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 
 #include "file_util.h"
 #include "hash.h"
@@ -163,4 +164,15 @@ StateResult state_load(Gb *gb, const char *path) {
 	free(buf);
 	free(scratch);
 	return result;
+}
+
+bool state_time(const char *rom_path, int slot, time_t *when) {
+	char path[PATHS_MAX];
+	struct stat st;
+
+	if (!state_path(path, sizeof path, rom_path, slot) || stat(path, &st) != 0) {
+		return false;
+	}
+	*when = st.st_mtime;
+	return true;
 }
