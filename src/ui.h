@@ -3,6 +3,7 @@
 
 #include <stdbool.h>
 
+#include "cartridge.h"
 #include "crash_report.h"
 #include "platform.h"
 #include "settings.h"
@@ -11,6 +12,13 @@ typedef enum {
 	UI_SCREEN_MENU,
 	UI_SCREEN_ROM_DROP,
 	UI_SCREEN_SETTINGS,
+	UI_SCREEN_EMULATION,
+	UI_SCREEN_DISPLAY,
+	UI_SCREEN_AUDIO,
+	UI_SCREEN_RECENT,
+	UI_SCREEN_ABOUT,
+	UI_SCREEN_SAVES,
+	UI_SCREEN_ROM_INFO,
 	UI_SCREEN_KEYBOARD, /* "Controls": the selected player's keyboard binds */
 	UI_SCREEN_GAMEPAD,	/* "Controls": the selected player's gamepad binds */
 	UI_SCREEN_PAD_TEST,
@@ -24,6 +32,7 @@ typedef enum {
 	UI_ACTION_NONE,
 	UI_ACTION_QUIT,
 	UI_ACTION_LOAD_ROM,
+	UI_ACTION_SAVE_STATE,
 	UI_ACTION_LOAD_STATE,
 	UI_ACTION_RESUME,
 	UI_ACTION_RESET,
@@ -32,7 +41,7 @@ typedef enum {
 
 typedef struct {
 	UiScreen screen;
-	UiScreen parent;
+	UiScreen back[UI_SCREEN_COUNT]; /* where ESC / Back goes, set when a screen is opened */
 	int row;
 	int sel[UI_SCREEN_COUNT];
 	int player;			 /* whose binds the keyboard / gamepad screens edit (0 or 1) */
@@ -44,6 +53,11 @@ typedef struct {
 	bool dialog_open;
 	PlatformDialog dialog_kind;
 	bool boot_rom_installed;
+	bool saving;		   /* save states screen: true = Save, false = Load */
+	int slot_pick;		   /* slot chosen on the save states screen, 0 if none */
+	char slot_text[9][20]; /* "2026-11-23 22:10" or "Empty" */
+	bool has_rom_info;
+	CartridgeInfo rom_info;
 	bool system_dark;
 	bool status_warn;
 	bool in_game;
@@ -63,7 +77,10 @@ typedef struct {
 } Hud;
 
 void ui_init(Ui *ui, Settings *settings);
-void ui_open_pause(Ui *ui);
+/* info and rom_path describe the running game (info may be NULL). */
+void ui_open_pause(Ui *ui, const CartridgeInfo *info, const char *rom_path);
+/* The slot picked on the save states screen (once), or fallback. */
+int ui_take_slot(Ui *ui, int fallback);
 void ui_open_crash(Ui *ui, const CrashReport *report);
 void ui_notify(Ui *ui, const char *text, bool warn);
 void ui_set_system_dark(Ui *ui, bool dark);

@@ -2,11 +2,18 @@
 
 #include <stdio.h>
 #include <string.h>
+#include <time.h>
 
 #include "bindings.h"
 #include "boot.h"
+#include "display.h"
+#include "license.h"
 #include "palette.h"
+#include "paths.h"
+#include "recent.h"
+#include "state.h"
 #include "theme.h"
+#include "version.h"
 
 #define COUNT(a) ((int)(sizeof(a) / sizeof((a)[0])))
 
@@ -39,11 +46,17 @@
 #define HERO_SUBTITLE_Y 180
 
 /* Standard list rows. */
-#define LIST_Y		112
-#define HERO_LIST_Y 250
-#define ROW_H		40
-#define ROW_PITCH	48
-#define ROW_PAD		16
+#define LIST_Y			112
+#define HERO_LIST_Y		232
+#define ABOUT_MARK_Y	36
+#define ABOUT_MARK_CELL 16
+#define ABOUT_TITLE_Y	90
+#define ABOUT_VERSION_Y 146
+#define ABOUT_BLURB_Y	186
+#define ABOUT_LIST_Y	296
+#define ROW_H			40
+#define ROW_PITCH		48
+#define ROW_PAD			16
 
 /* Controls / shortcuts rows are denser and carry key cells. */
 #define PAD_ROW_H		24
@@ -106,8 +119,6 @@
 #define CRASH_PITCH		 40
 #define CRASH_ROW_H		 32
 
-#define OVERLAY_ALPHA 0xB4000000u
-
 /* In-game HUD chips. */
 #define HUD_MARGIN 20
 #define HUD_CHIP_H 32
@@ -119,28 +130,76 @@
 
 enum {
 	MENU_LOAD_ROM,
+	MENU_RECENT,
 	MENU_SETTINGS,
+	MENU_ABOUT,
 	MENU_QUIT,
 	MENU_COUNT,
 };
 
 enum {
-	SET_BOOT_ROM_ENABLED,
-	SET_BOOT_ROM_FILE,
-	SET_PLAYERS,
+	SET_EMULATION,
+	SET_DISPLAY,
+	SET_AUDIO,
 	SET_CONTROLS,
 	SET_SHORTCUTS,
-	SET_THEME,
+	SET_DATA,
 	SET_BACK,
 	SETTINGS_COUNT,
 };
 
 enum {
+	EM_BOOT_ROM,
+	EM_BOOT_FILE,
+	EM_PLAYERS,
+	EM_TURBO,
+	EM_BACK,
+	EMULATION_COUNT,
+};
+
+enum {
+	DI_THEME,
+	DI_PALETTE,
+	DI_FILTER,
+	DI_GHOSTING,
+	DI_BACK,
+	DISPLAY_COUNT,
+};
+
+#define AUDIO_CHANNELS 4
+enum {
+	AU_VOLUME,
+	AU_CHANNEL1,
+	AU_BACK = AU_CHANNEL1 + AUDIO_CHANNELS,
+	AUDIO_COUNT,
+};
+
+#define SAVE_SLOTS 9
+enum {
+	SV_MODE,
+	SV_SLOT1,
+	SV_BACK = SV_SLOT1 + SAVE_SLOTS,
+	SAVES_COUNT,
+};
+
+enum {
+	AB_LICENSE,
+	AB_SOURCE,
+	AB_BACK,
+	ABOUT_COUNT,
+};
+
+#define RECENT_ROWS (RECENT_MAX + 1)
+#define VOLUME_STEP 10
+#define REPO_URL	"https://github.com/felypz/gboyc"
+
+enum {
 	PAUSE_CONTINUE,
-	PAUSE_RESET,
-	PAUSE_CONTROLS,
-	PAUSE_SHORTCUTS,
+	PAUSE_SAVES,
+	PAUSE_INFO,
 	PAUSE_LOAD,
+	PAUSE_RESET,
+	PAUSE_SETTINGS,
 	PAUSE_MAIN,
 	PAUSE_COUNT,
 };
@@ -175,10 +234,11 @@ typedef struct {
 	int count;
 } ListGeom;
 
-static const char *const MENU_LABELS[MENU_COUNT] = {"Load ROM", "Settings", "Quit"};
+static const char *const MENU_LABELS[MENU_COUNT] = {"Load ROM", "Recent ROMs", "Settings", "About",
+													"Quit"};
 static const char *const PAUSE_LABELS[PAUSE_COUNT] = {
-	"Continue", "Reset", "Controls", "Emulator shortcuts", "Load ROM", "Main menu"};
-static const char *const PAUSE_VALUES[PAUSE_COUNT] = {NULL, NULL, ">", ">", NULL, NULL};
+	"Continue", "Save states", "ROM info", "Load ROM", "Reset", "Settings", "Main menu"};
+static const char *const PAUSE_VALUES[PAUSE_COUNT] = {NULL, ">", ">", NULL, NULL, ">", NULL};
 static const char *const CRASH_LABELS[CR_COUNT] = {"Reset", "Load state", "Load ROM", "Main menu",
 												   "Dismiss"};
 
@@ -188,26 +248,29 @@ static const JoyButton PAD_ORDER[JOY_BTN_COUNT] = {
 	JOY_BTN_A,	JOY_BTN_B,	  JOY_BTN_SELECT, JOY_BTN_START,
 };
 
-static const Hint HINTS_MENU[] = {{"UP/DOWN", "Select"}, {"ENTER", "Open"}};
-static const Hint HINTS_PAUSE[] = {{"UP/DOWN", "Select"}, {"ENTER", "Open"}, {"ESC", "Resume"}};
-static const Hint HINTS_SETTINGS[] = {
-	{"UP/DOWN", "Select"}, {"L/R", "Adjust"}, {"ENTER", "Open"}, {"ESC", "Back"}};
+static const Hint HINTS_RECENT[] = {{"ESC", "Back"}, {"ENTER", "Load"}};
+static const Hint HINTS_SAVES[] = {{"ESC", "Back"}, {"ENTER", "Confirm"}};
+static const Hint HINTS_ABOUT[] = {{"ESC", "Back"}, {"ENTER", "Select"}};
+static const Hint HINTS_BACK_ONLY[] = {{"ESC", "Back"}};
+static const Hint HINTS_MENU[] = {{"ENTER", "Select"}};
+static const Hint HINTS_PAUSE[] = {{"ESC", "Resume"}, {"ENTER", "Select"}};
+static const Hint HINTS_SETTINGS[] = {{"ESC", "Back"}, {"ENTER", "Select"}};
 static int hint_at(const Hint *hints, int count, int mx, int my);
-static const Hint HINTS_PAD_TEST[] = {{"L/R", "Gamepad"}, {"ESC", "Back"}, {"BACK+START", "Back"}};
+static const Hint HINTS_PAD_TEST[] = {{"ESC", "Back"}, {"BACK+START", "Back"}, {"L/R", "Gamepad"}};
 /* Controls: the hint bar doubles as buttons (HINT_EVENTS lists what each one sends). */
 static const Hint HINTS_CONTROLS[] = {
 	{"ESC", "Back"}, {"ENTER", "Rebind"}, {"DEL", "Clear"}, {"F1", "Test"}};
 static const PlatformEventType HINT_EVENTS_CONTROLS[] = {PLATFORM_EV_BACK, PLATFORM_EV_CONFIRM,
 														 PLATFORM_EV_CLEAR, PLATFORM_EV_TEST};
 static const Hint HINTS_BIND[] = {{"ESC", "Back"}, {"ENTER", "Rebind"}, {"DEL", "Clear"}};
-static const Hint HINTS_CAPTURE_KEY[] = {{"KEY", "Bind"}, {"ESC", "Cancel"}};
-static const Hint HINTS_CAPTURE_BUTTON[] = {{"BTN", "Bind"}, {"ESC", "Cancel"}};
+static const Hint HINTS_CAPTURE_KEY[] = {{"ESC", "Cancel"}, {"KEY", "Bind"}};
+static const Hint HINTS_CAPTURE_BUTTON[] = {{"ESC", "Cancel"}, {"BTN", "Bind"}};
 /* "Bind all": DEL leaves the current bind unmapped, ENTER stops and leaves the rest unmapped. */
 static const Hint HINTS_BIND_ALL_KEY[] = {
-	{"KEY", "Bind"}, {"DEL", "Unmapped"}, {"ENTER", "Finish"}, {"ESC", "Cancel"}};
+	{"ESC", "Cancel"}, {"ENTER", "Finish"}, {"DEL", "Unmapped"}, {"KEY", "Bind"}};
 static const Hint HINTS_BIND_ALL_BUTTON[] = {
-	{"BTN", "Bind"}, {"DEL", "Unmapped"}, {"ENTER", "Finish"}, {"ESC", "Cancel"}};
-static const Hint HINTS_CRASH[] = {{"UP/DOWN", "Select"}, {"ENTER", "Open"}};
+	{"ESC", "Cancel"}, {"ENTER", "Finish"}, {"DEL", "Unmapped"}, {"BTN", "Bind"}};
+static const Hint HINTS_CRASH[] = {{"ENTER", "Select"}};
 
 /* -- Binding screens: what each one edits -- */
 
@@ -285,6 +348,20 @@ static ListGeom geom(UiScreen screen) {
 		return (ListGeom){HERO_LIST_Y, ROW_PITCH, ROW_H, MENU_COUNT};
 	case UI_SCREEN_SETTINGS:
 		return (ListGeom){LIST_Y, ROW_PITCH, ROW_H, SETTINGS_COUNT};
+	case UI_SCREEN_EMULATION:
+		return (ListGeom){LIST_Y, ROW_PITCH, ROW_H, EMULATION_COUNT};
+	case UI_SCREEN_DISPLAY:
+		return (ListGeom){LIST_Y, ROW_PITCH, ROW_H, DISPLAY_COUNT};
+	case UI_SCREEN_AUDIO:
+		return (ListGeom){LIST_Y, ROW_PITCH, ROW_H, AUDIO_COUNT};
+	case UI_SCREEN_RECENT:
+		return (ListGeom){LIST_Y, ROW_PITCH, ROW_H, RECENT_ROWS};
+	case UI_SCREEN_ABOUT:
+		return (ListGeom){ABOUT_LIST_Y, ROW_PITCH, ROW_H, ABOUT_COUNT};
+	case UI_SCREEN_SAVES:
+		return (ListGeom){LIST_Y, PAD_ROW_PITCH, PAD_ROW_H, SAVES_COUNT};
+	case UI_SCREEN_ROM_INFO:
+		return (ListGeom){PAD_TEST_BACK_Y, ROW_PITCH, ROW_H, 1};
 	case UI_SCREEN_KEYBOARD:
 	case UI_SCREEN_GAMEPAD:
 	case UI_SCREEN_SHORTCUTS:
@@ -323,7 +400,7 @@ static void go(Ui *ui, UiScreen screen) {
 
 /* Like go(), but Back returns to the screen we came from. */
 static void go_child(Ui *ui, UiScreen screen) {
-	ui->parent = ui->screen;
+	ui->back[screen] = ui->screen;
 	go(ui, screen);
 }
 
@@ -387,8 +464,22 @@ void ui_init(Ui *ui, Settings *settings) {
 	reset(ui, settings, UI_SCREEN_MENU, false);
 }
 
-void ui_open_pause(Ui *ui) {
+void ui_open_pause(Ui *ui, const CartridgeInfo *info, const char *rom_path) {
 	reset(ui, ui->settings, UI_SCREEN_PAUSE, true);
+	if (info) {
+		ui->rom_info = *info;
+		ui->has_rom_info = true;
+	}
+	if (rom_path) {
+		snprintf(ui->rom_path, sizeof ui->rom_path, "%s", rom_path);
+	}
+}
+
+int ui_take_slot(Ui *ui, int fallback) {
+	int slot = ui->slot_pick ? ui->slot_pick : fallback;
+
+	ui->slot_pick = 0;
+	return slot;
 }
 
 void ui_open_crash(Ui *ui, const CrashReport *report) {
@@ -410,9 +501,52 @@ const char *ui_selected_rom(const Ui *ui) {
 
 /* -- Actions -- */
 
-static void open_settings(Ui *ui) {
-	go(ui, UI_SCREEN_SETTINGS);
+static void open_emulation(Ui *ui) {
+	go_child(ui, UI_SCREEN_EMULATION);
 	ui->boot_rom_installed = boot_is_installed(ui->settings->boot_rom_file);
+}
+
+static void open_saves(Ui *ui) {
+	time_t when;
+
+	for (int i = 0; i < SAVE_SLOTS; i++) {
+		if (state_time(ui->rom_path, i + 1, &when)) {
+			strftime(ui->slot_text[i], sizeof ui->slot_text[i], "%Y-%m-%d %H:%M", localtime(&when));
+		} else {
+			snprintf(ui->slot_text[i], sizeof ui->slot_text[i], "Empty");
+		}
+	}
+	go_child(ui, UI_SCREEN_SAVES);
+}
+
+/* Opens the data folder in the desktop's file manager. */
+/* Opens the license text in the desktop's default text editor. */
+static void open_license(Ui *ui) {
+	char path[PATHS_MAX];
+	char url[PATHS_MAX + 8];
+
+	if (!license_file(path, sizeof path)) {
+		set_status(ui, "Cannot write the license file", true);
+		return;
+	}
+	snprintf(url, sizeof url, "file://%s", path);
+	platform_open_url(url);
+	set_status(ui, "Opening the license...", false);
+}
+
+static void open_data_folder(Ui *ui) {
+	char dir[PATHS_MAX];
+	char url[PATHS_MAX + 8];
+	char shown[sizeof ui->status];
+
+	if (!paths_dir(PATHS_DATA, dir, sizeof dir) || !paths_make(PATHS_DATA, NULL)) {
+		set_status(ui, "Data folder unavailable", true);
+		return;
+	}
+	snprintf(url, sizeof url, "file://%s", dir);
+	platform_open_url(url);
+	ellipsize(shown, sizeof shown, dir, sizeof shown - 1);
+	set_status(ui, shown, false);
 }
 
 static void open_controls(Ui *ui) {
@@ -422,8 +556,11 @@ static void open_controls(Ui *ui) {
 
 /* Flips between the keyboard and gamepad binds of the same player. */
 static void switch_device(Ui *ui) {
+	UiScreen from = ui->screen;
+
 	ui->sel[ui->screen] = ui->row;
 	ui->screen = ui->screen == UI_SCREEN_KEYBOARD ? UI_SCREEN_GAMEPAD : UI_SCREEN_KEYBOARD;
+	ui->back[ui->screen] = ui->back[from];
 	ui->prefer_gamepad = ui->screen == UI_SCREEN_GAMEPAD;
 	ui->status[0] = '\0';
 }
@@ -456,6 +593,13 @@ static void open_dialog(Ui *ui, Platform *p, PlatformDialog kind) {
 	platform_open_file_dialog(p, kind);
 }
 
+/* Players and the boot ROM only matter when a game starts. */
+static void note_next_game(Ui *ui) {
+	if (ui->in_game) {
+		set_status(ui, "Applies to the next ROM", false);
+	}
+}
+
 static void toggle_boot_rom(Ui *ui) {
 	if (!ui->boot_rom_installed) {
 		set_status(ui, "No boot ROM found", true);
@@ -464,6 +608,7 @@ static void toggle_boot_rom(Ui *ui) {
 
 	ui->settings->boot_rom_enabled = !ui->settings->boot_rom_enabled;
 	ui->status[0] = '\0';
+	note_next_game(ui);
 	save_settings(ui);
 }
 
@@ -474,17 +619,8 @@ static void cycle_theme(Ui *ui, int dir) {
 
 static void toggle_players(Ui *ui) {
 	ui->settings->players = ui->settings->players == 1 ? 2 : 1;
+	note_next_game(ui);
 	save_settings(ui);
-}
-
-static void adjust_setting(Ui *ui, int dir) {
-	if (ui->row == SET_BOOT_ROM_ENABLED) {
-		toggle_boot_rom(ui);
-	} else if (ui->row == SET_PLAYERS) {
-		toggle_players(ui);
-	} else if (ui->row == SET_THEME) {
-		cycle_theme(ui, dir);
-	}
 }
 
 static void import_boot_rom(Ui *ui, const char *path) {
@@ -662,7 +798,7 @@ static void bind_confirm(Ui *ui, Platform *p) {
 	} else if (ui->row == bind_reset_row(ui->screen)) {
 		reset_binds(ui);
 	} else if (ui->row == bind_back_row(ui->screen)) {
-		go(ui, ui->parent);
+		go(ui, ui->back[ui->screen]);
 	} else {
 		start_capture(ui, p);
 	}
@@ -715,33 +851,227 @@ static void bind_screen_event(Ui *ui, Platform *p, const PlatformEvent *ev) {
 		bind_clear(ui);
 		break;
 	case PLATFORM_EV_BACK:
-		go(ui, ui->parent);
+		go(ui, ui->back[ui->screen]);
 		break;
 	default:
 		break;
 	}
 }
 
-static void settings_event(Ui *ui, Platform *p, const PlatformEvent *ev) {
-	if (list_navigate(ui, ev->type)) {
+/* -- Option lists (settings and its sub-screens, recent ROMs, save states, about) -- */
+
+typedef struct {
+	char label[48];
+	char value[40];
+	bool has_value;
+	bool adjust; /* shown as "< value >" while selected */
+} ListRow;
+
+static ListRow make_row(const char *label, const char *value, bool adjust) {
+	ListRow r = {0};
+
+	snprintf(r.label, sizeof r.label, "%s", label);
+	if (value) {
+		snprintf(r.value, sizeof r.value, "%s", value);
+		r.has_value = true;
+	}
+	r.adjust = adjust;
+	return r;
+}
+
+static const char *base_name(const char *path) {
+	const char *slash = strrchr(path, '/');
+
+	return slash ? slash + 1 : path;
+}
+
+static ListRow list_row(const Ui *ui, UiScreen screen, int i) {
+	static const char *const SETTINGS[SETTINGS_COUNT] = {
+		"Emulation", "Display", "Audio", "Controls", "Emulator shortcuts", "Data folder", "Back"};
+	static const char *const CHANNELS[AUDIO_CHANNELS] = {"Pulse 1", "Pulse 2", "Wave", "Noise"};
+	const Settings *s = ui->settings;
+	char text[48];
+
+	switch (screen) {
+	case UI_SCREEN_SETTINGS:
+		return make_row(SETTINGS[i], i == SET_BACK ? NULL : (i == SET_DATA ? "Open" : ">"), false);
+	case UI_SCREEN_EMULATION:
+		switch (i) {
+		case EM_BOOT_ROM:
+			return make_row("Boot ROM",
+							!ui->boot_rom_installed ? "Unavailable"
+													: (s->boot_rom_enabled ? "ON" : "OFF"),
+							ui->boot_rom_installed);
+		case EM_BOOT_FILE:
+			ellipsize(text, sizeof text, ui->boot_rom_installed ? s->boot_rom_file : "none", 14);
+			return make_row("Boot ROM file", text, false);
+		case EM_PLAYERS:
+			return make_row("Players", s->players == 2 ? "2 (linked)" : "1", true);
+		case EM_TURBO:
+			snprintf(text, sizeof text, "%dx", s->turbo);
+			return make_row("Turbo speed", text, true);
+		default:
+			return make_row("Back", NULL, false);
+		}
+	case UI_SCREEN_DISPLAY:
+		switch (i) {
+		case DI_THEME:
+			return make_row("Theme", theme_mode_name(s->theme), true);
+		case DI_PALETTE:
+			return make_row("Palette", palette_name(s->palette), true);
+		case DI_FILTER:
+			return make_row("Filter", s->smooth ? "Smooth" : "Sharp", true);
+		case DI_GHOSTING:
+			return make_row("LCD ghosting", ghosting_name(s->ghosting), true);
+		default:
+			return make_row("Back", NULL, false);
+		}
+	case UI_SCREEN_AUDIO:
+		if (i == AU_VOLUME) {
+			snprintf(text, sizeof text, "%d%%", s->volume);
+			return make_row("Volume", text, true);
+		}
+		if (i == AU_BACK) {
+			return make_row("Back", NULL, false);
+		}
+		return make_row(CHANNELS[i - AU_CHANNEL1],
+						(s->channels >> (i - AU_CHANNEL1)) & 1 ? "ON" : "OFF", true);
+	case UI_SCREEN_RECENT: {
+		const char *path = i < RECENT_MAX ? recent_get(i) : NULL;
+
+		if (i == RECENT_MAX) {
+			return make_row("Back", NULL, false);
+		}
+		if (!path) {
+			return make_row("-", NULL, false);
+		}
+		ellipsize(text, sizeof text, base_name(path), 40);
+		return make_row(text, NULL, false);
+	}
+	case UI_SCREEN_SAVES:
+		if (i == SV_MODE) {
+			return make_row("Action", ui->saving ? "Save" : "Load", true);
+		}
+		if (i == SV_BACK) {
+			return make_row("Back", NULL, false);
+		}
+		snprintf(text, sizeof text, "Slot %d", i - SV_SLOT1 + 1);
+		return make_row(text, ui->slot_text[i - SV_SLOT1], false);
+	case UI_SCREEN_ABOUT: {
+		static const char *const ABOUT[ABOUT_COUNT] = {"Check license", "Check source code",
+													   "Back"};
+
+		return make_row(ABOUT[i], NULL, false);
+	}
+	default:
+		return make_row("Back", NULL, false);
+	}
+}
+
+/* Cycles v through 0..n-1; a confirm (dir 0) moves forward. */
+static int cycle(int v, int dir, int n) {
+	return (v + n + (dir ? dir : 1)) % n;
+}
+
+static void change_emulation(Ui *ui, Platform *p, int row, int dir) {
+	Settings *s = ui->settings;
+
+	switch (row) {
+	case EM_BOOT_ROM:
+		toggle_boot_rom(ui);
+		return;
+	case EM_BOOT_FILE:
+		if (dir == 0) {
+			open_dialog(ui, p, PLATFORM_DIALOG_BOOT_ROM);
+		}
+		return;
+	case EM_PLAYERS:
+		toggle_players(ui);
+		return;
+	case EM_TURBO:
+		s->turbo = SETTINGS_TURBO_MIN + cycle(s->turbo - SETTINGS_TURBO_MIN, dir,
+											  SETTINGS_TURBO_MAX - SETTINGS_TURBO_MIN + 1);
+		break;
+	default:
 		return;
 	}
+	save_settings(ui);
+}
 
-	switch (ev->type) {
-	case PLATFORM_EV_LEFT:
-	case PLATFORM_EV_RIGHT:
-		adjust_setting(ui, ev->type == PLATFORM_EV_RIGHT ? 1 : -1);
+static void change_display(Ui *ui, int row, int dir) {
+	Settings *s = ui->settings;
+
+	switch (row) {
+	case DI_THEME:
+		cycle_theme(ui, dir ? dir : 1);
+		return;
+	case DI_PALETTE:
+		s->palette = (Palette)cycle((int)s->palette, dir, PALETTE_COUNT);
 		break;
-	case PLATFORM_EV_CONFIRM:
-		switch (ui->row) {
-		case SET_BOOT_ROM_ENABLED:
-			toggle_boot_rom(ui);
+	case DI_FILTER:
+		s->smooth = !s->smooth;
+		break;
+	case DI_GHOSTING:
+		s->ghosting = (Ghosting)cycle((int)s->ghosting, dir, GHOST_COUNT);
+		break;
+	default:
+		return;
+	}
+	save_settings(ui);
+}
+
+static void change_audio(Ui *ui, int row, int dir) {
+	Settings *s = ui->settings;
+
+	if (row == AU_VOLUME) {
+		int steps = SETTINGS_VOLUME_MAX / VOLUME_STEP + 1;
+
+		s->volume = cycle(s->volume / VOLUME_STEP, dir, steps) * VOLUME_STEP;
+	} else if (row >= AU_CHANNEL1 && row < AU_BACK) {
+		s->channels ^= 1u << (row - AU_CHANNEL1);
+	} else {
+		return;
+	}
+	save_settings(ui);
+}
+
+static UiAction change_saves(Ui *ui, int row, int dir) {
+	if (row == SV_MODE) {
+		ui->saving = !ui->saving;
+		return UI_ACTION_NONE;
+	}
+	if (dir != 0 || row < SV_SLOT1 || row >= SV_BACK) {
+		return UI_ACTION_NONE;
+	}
+
+	int slot = row - SV_SLOT1;
+
+	if (!ui->saving && strcmp(ui->slot_text[slot], "Empty") == 0) {
+		set_status(ui, "That slot is empty", true);
+		return UI_ACTION_NONE;
+	}
+	ui->slot_pick = slot + 1;
+	return ui->saving ? UI_ACTION_SAVE_STATE : UI_ACTION_LOAD_STATE;
+}
+
+/* dir is -1 / +1 for LEFT / RIGHT and 0 for ENTER or a click. */
+static UiAction list_change(Ui *ui, Platform *p, int dir) {
+	int row = ui->row;
+
+	switch (ui->screen) {
+	case UI_SCREEN_SETTINGS:
+		if (dir != 0) {
 			break;
-		case SET_BOOT_ROM_FILE:
-			open_dialog(ui, p, PLATFORM_DIALOG_BOOT_ROM);
+		}
+		switch (row) {
+		case SET_EMULATION:
+			open_emulation(ui);
 			break;
-		case SET_PLAYERS:
-			toggle_players(ui);
+		case SET_DISPLAY:
+			go_child(ui, UI_SCREEN_DISPLAY);
+			break;
+		case SET_AUDIO:
+			go_child(ui, UI_SCREEN_AUDIO);
 			break;
 		case SET_CONTROLS:
 			open_controls(ui);
@@ -749,20 +1079,98 @@ static void settings_event(Ui *ui, Platform *p, const PlatformEvent *ev) {
 		case SET_SHORTCUTS:
 			open_shortcuts(ui);
 			break;
-		case SET_THEME:
-			cycle_theme(ui, 1);
+		case SET_DATA:
+			open_data_folder(ui);
 			break;
 		default:
-			go(ui, UI_SCREEN_MENU);
+			go(ui, ui->back[ui->screen]);
 			break;
 		}
 		break;
-	case PLATFORM_EV_BACK:
-		go(ui, UI_SCREEN_MENU);
+	case UI_SCREEN_EMULATION:
+		if (row == EM_BACK) {
+			if (dir == 0) {
+				go(ui, ui->back[ui->screen]);
+			}
+		} else {
+			change_emulation(ui, p, row, dir);
+		}
+		break;
+	case UI_SCREEN_DISPLAY:
+		if (row == DI_BACK) {
+			if (dir == 0) {
+				go(ui, ui->back[ui->screen]);
+			}
+		} else {
+			change_display(ui, row, dir);
+		}
+		break;
+	case UI_SCREEN_AUDIO:
+		if (row == AU_BACK) {
+			if (dir == 0) {
+				go(ui, ui->back[ui->screen]);
+			}
+		} else {
+			change_audio(ui, row, dir);
+		}
+		break;
+	case UI_SCREEN_RECENT:
+		if (dir != 0) {
+			break;
+		}
+		if (row == RECENT_MAX) {
+			go(ui, ui->back[ui->screen]);
+		} else if (recent_get(row)) {
+			snprintf(ui->rom_path, sizeof ui->rom_path, "%s", recent_get(row));
+			return UI_ACTION_LOAD_ROM;
+		}
+		break;
+	case UI_SCREEN_SAVES:
+		if (row == SV_BACK) {
+			if (dir == 0) {
+				go(ui, ui->back[ui->screen]);
+			}
+			break;
+		}
+		return change_saves(ui, row, dir);
+	case UI_SCREEN_ABOUT:
+		if (dir != 0) {
+			break;
+		}
+		if (row == AB_LICENSE) {
+			open_license(ui);
+		} else if (row == AB_SOURCE) {
+			platform_open_url(REPO_URL);
+			set_status(ui, "Opening the repository...", false);
+		} else {
+			go(ui, ui->back[ui->screen]);
+		}
 		break;
 	default:
 		break;
 	}
+	return UI_ACTION_NONE;
+}
+
+static UiAction list_event(Ui *ui, Platform *p, const PlatformEvent *ev) {
+	if (list_navigate(ui, ev->type)) {
+		return UI_ACTION_NONE;
+	}
+
+	switch (ev->type) {
+	case PLATFORM_EV_LEFT:
+		return list_change(ui, p, -1);
+	case PLATFORM_EV_RIGHT:
+		return list_change(ui, p, 1);
+	case PLATFORM_EV_CONFIRM:
+		return list_change(ui, p, 0);
+	case PLATFORM_EV_BACK:
+		go(ui, ui->back[ui->screen]);
+		break;
+	default:
+		break;
+	}
+	return UI_ACTION_NONE;
 }
 
 static UiAction menu_event(Ui *ui, Platform *p, const PlatformEvent *ev) {
@@ -773,8 +1181,14 @@ static UiAction menu_event(Ui *ui, Platform *p, const PlatformEvent *ev) {
 	switch (ui->row) {
 	case MENU_QUIT:
 		return UI_ACTION_QUIT;
+	case MENU_RECENT:
+		go_child(ui, UI_SCREEN_RECENT);
+		break;
 	case MENU_SETTINGS:
-		open_settings(ui);
+		go_child(ui, UI_SCREEN_SETTINGS);
+		break;
+	case MENU_ABOUT:
+		go_child(ui, UI_SCREEN_ABOUT);
 		break;
 	default:
 		open_dialog(ui, p, PLATFORM_DIALOG_ROM);
@@ -799,11 +1213,14 @@ static UiAction pause_event(Ui *ui, Platform *p, const PlatformEvent *ev) {
 		return UI_ACTION_RESUME;
 	case PAUSE_RESET:
 		return UI_ACTION_RESET;
-	case PAUSE_CONTROLS:
-		open_controls(ui);
+	case PAUSE_SAVES:
+		open_saves(ui);
 		break;
-	case PAUSE_SHORTCUTS:
-		open_shortcuts(ui);
+	case PAUSE_INFO:
+		go_child(ui, UI_SCREEN_ROM_INFO);
+		break;
+	case PAUSE_SETTINGS:
+		go_child(ui, UI_SCREEN_SETTINGS);
 		break;
 	case PAUSE_LOAD:
 		open_dialog(ui, p, PLATFORM_DIALOG_ROM);
@@ -865,11 +1282,21 @@ static UiAction dispatch(Ui *ui, Platform *p, const PlatformEvent *ev) {
 		return pause_event(ui, p, ev);
 	case UI_SCREEN_ROM_DROP:
 		if (ev->type == PLATFORM_EV_BACK) {
-			go(ui, ui->parent);
+			go(ui, ui->back[ui->screen]);
 		}
 		break;
 	case UI_SCREEN_SETTINGS:
-		settings_event(ui, p, ev);
+	case UI_SCREEN_EMULATION:
+	case UI_SCREEN_DISPLAY:
+	case UI_SCREEN_AUDIO:
+	case UI_SCREEN_RECENT:
+	case UI_SCREEN_ABOUT:
+	case UI_SCREEN_SAVES:
+		return list_event(ui, p, ev);
+	case UI_SCREEN_ROM_INFO:
+		if (ev->type == PLATFORM_EV_BACK || ev->type == PLATFORM_EV_CONFIRM) {
+			go(ui, ui->back[ui->screen]);
+		}
 		break;
 	case UI_SCREEN_KEYBOARD:
 	case UI_SCREEN_GAMEPAD:
@@ -1222,55 +1649,97 @@ static void draw_rom_drop(Platform *p, const Theme *t) {
 	text_center(p, cx, DROP_HINT_Y, SCALE_CAPTION, t->dim, "Press ESC to go back");
 }
 
-static void draw_settings(const Ui *ui, Platform *p, const Theme *t) {
-	char file[24];
-	ListGeom g = geom(UI_SCREEN_SETTINGS);
-	const Settings *s = ui->settings;
+static void draw_list(const Ui *ui, Platform *p, const Theme *t, const char *title,
+					  const Hint *hints, int hint_count) {
+	ListGeom g = geom(ui->screen);
 
-	draw_header(p, t, "Settings");
+	draw_header(p, t, title);
+	for (int i = 0; i < g.count; i++) {
+		ListRow r = list_row(ui, ui->screen, i);
 
-	for (int i = 0; i < SETTINGS_COUNT; i++) {
-		const char *label = "Back";
-		const char *value = NULL;
-		bool adjustable = false;
-
-		switch (i) {
-		case SET_BOOT_ROM_ENABLED:
-			label = "Boot ROM";
-			value = !ui->boot_rom_installed ? "Unavailable" : (s->boot_rom_enabled ? "ON" : "OFF");
-			adjustable = ui->boot_rom_installed;
-			break;
-		case SET_BOOT_ROM_FILE:
-			label = "Boot ROM file";
-			ellipsize(file, sizeof file, ui->boot_rom_installed ? s->boot_rom_file : "none", 14);
-			value = file;
-			break;
-		case SET_PLAYERS:
-			label = "Players";
-			value = s->players == 2 ? "2 (linked)" : "1";
-			adjustable = true;
-			break;
-		case SET_CONTROLS:
-			label = "Controls";
-			value = ">";
-			break;
-		case SET_SHORTCUTS:
-			label = "Emulator shortcuts";
-			value = ">";
-			break;
-		case SET_THEME:
-			label = "Theme";
-			value = theme_mode_name(s->theme);
-			adjustable = true;
-			break;
-		default:
-			break;
-		}
-		draw_row(p, t, g.y0 + i * g.pitch, g.h, i == ui->row, label, value, adjustable);
+		draw_row(p, t, g.y0 + i * g.pitch, g.h, i == ui->row, r.label, r.has_value ? r.value : NULL,
+				 r.adjust);
 	}
-
 	draw_status(ui, p, t);
-	draw_hints(p, t, HINTS_SETTINGS, COUNT(HINTS_SETTINGS));
+	draw_hints(p, t, hints, hint_count);
+}
+
+static void draw_about(const Ui *ui, Platform *p, const Theme *t) {
+	char version[32];
+	ListGeom g = geom(UI_SCREEN_ABOUT);
+
+	draw_mark(p, MARGIN_X, ABOUT_MARK_Y, ABOUT_MARK_CELL);
+	platform_draw_text(p, MARGIN_X, ABOUT_TITLE_Y, SCALE_HERO, t->text, "GBOYC");
+	snprintf(version, sizeof version, "Version %s", GBOYC_VERSION);
+	platform_draw_text(p, MARGIN_X, ABOUT_VERSION_Y, SCALE_BODY, t->dim, version);
+	platform_draw_text(p, MARGIN_X, ABOUT_BLURB_Y, SCALE_BODY, t->text, "A Game Boy emulator");
+	platform_draw_text(p, MARGIN_X, ABOUT_BLURB_Y + 24, SCALE_BODY, t->text,
+					   "made in C11 for Linux");
+	platform_draw_text(p, MARGIN_X, ABOUT_BLURB_Y + 60, SCALE_BODY, t->dim,
+					   "Open Source software under GPL-3");
+
+	for (int i = 0; i < g.count; i++) {
+		ListRow r = list_row(ui, UI_SCREEN_ABOUT, i);
+
+		draw_row(p, t, g.y0 + i * g.pitch, g.h, i == ui->row, r.label, NULL, false);
+	}
+	draw_status(ui, p, t);
+	draw_hints(p, t, HINTS_ABOUT, COUNT(HINTS_ABOUT));
+}
+
+static void format_size(char *out, size_t size, unsigned bytes) {
+	if (bytes == 0) {
+		snprintf(out, size, "None");
+	} else if (bytes >= 1024 * 1024) {
+		snprintf(out, size, "%u MiB", bytes / (1024 * 1024));
+	} else if (bytes >= 1024) {
+		snprintf(out, size, "%u KiB", bytes / 1024);
+	} else {
+		snprintf(out, size, "%u bytes", bytes);
+	}
+}
+
+static void draw_rom_info(const Ui *ui, Platform *p, const Theme *t) {
+	const CartridgeInfo *c = &ui->rom_info;
+	ListGeom g = geom(UI_SCREEN_ROM_INFO);
+	char file[48];
+	char rom[24];
+	char ram[24];
+	char sum[24];
+	char ver[24];
+	struct {
+		const char *label;
+		const char *value;
+	} rows[] = {
+		{"Title", c->title[0] ? c->title : "(untitled)"},
+		{"Mapper", c->mapper},
+		{"ROM size", rom},
+		{"Save RAM", ram},
+		{"Battery save", c->battery ? "Yes" : "No"},
+		{"Game Boy Color", c->cgb ? "Has color features" : "DMG only"},
+		{"Header checksum", c->header_ok ? "OK" : "Bad"},
+		{"Global checksum", sum},
+		{"Version", ver},
+		{"File", file},
+	};
+
+	draw_header(p, t, "ROM info");
+	if (!ui->has_rom_info) {
+		text_center(p, UI_VIEW_W / 2, 200, SCALE_BODY, t->dim, "No game loaded");
+	} else {
+		format_size(rom, sizeof rom, c->rom_kib * 1024);
+		format_size(ram, sizeof ram, c->ram_bytes);
+		snprintf(sum, sizeof sum, "0x%04X", c->global_checksum);
+		snprintf(ver, sizeof ver, "%u", c->version);
+		ellipsize(file, sizeof file, base_name(ui->rom_path), 30);
+		for (int i = 0; i < COUNT(rows); i++) {
+			draw_row(p, t, LIST_Y + i * PAD_ROW_PITCH, PAD_ROW_H, false, rows[i].label,
+					 rows[i].value, false);
+		}
+	}
+	draw_row(p, t, g.y0, g.h, true, "Back", NULL, false);
+	draw_status(ui, p, t);
+	draw_hints(p, t, HINTS_BACK_ONLY, COUNT(HINTS_BACK_ONLY));
 }
 
 static void draw_key_cell(Platform *p, const Theme *t, int x, int y, bool selected, bool active,
@@ -1553,13 +2022,8 @@ static void draw_pad_test(const Ui *ui, Platform *p, const Theme *t) {
 void ui_draw(const Ui *ui, Platform *p) {
 	const Theme *t = theme_get(ui->settings->theme, ui->system_dark);
 
-	if (ui->in_game) {
-		/* Dim the running game behind the menu. */
-		platform_fill_rect(p, 0, 0, UI_VIEW_W, UI_VIEW_H, (t->bg & 0x00FFFFFFu) | OVERLAY_ALPHA);
-	} else {
-		platform_set_background(p, t->bg);
-		platform_clear(p, t->bg);
-	}
+	platform_set_background(p, t->bg);
+	platform_clear(p, t->bg);
 
 	switch (ui->screen) {
 	case UI_SCREEN_MENU:
@@ -1572,7 +2036,28 @@ void ui_draw(const Ui *ui, Platform *p) {
 		draw_rom_drop(p, t);
 		break;
 	case UI_SCREEN_SETTINGS:
-		draw_settings(ui, p, t);
+		draw_list(ui, p, t, "Settings", HINTS_SETTINGS, COUNT(HINTS_SETTINGS));
+		break;
+	case UI_SCREEN_EMULATION:
+		draw_list(ui, p, t, "Emulation", HINTS_SETTINGS, COUNT(HINTS_SETTINGS));
+		break;
+	case UI_SCREEN_DISPLAY:
+		draw_list(ui, p, t, "Display", HINTS_SETTINGS, COUNT(HINTS_SETTINGS));
+		break;
+	case UI_SCREEN_AUDIO:
+		draw_list(ui, p, t, "Audio", HINTS_SETTINGS, COUNT(HINTS_SETTINGS));
+		break;
+	case UI_SCREEN_RECENT:
+		draw_list(ui, p, t, "Recent ROMs", HINTS_RECENT, COUNT(HINTS_RECENT));
+		break;
+	case UI_SCREEN_SAVES:
+		draw_list(ui, p, t, "Save states", HINTS_SAVES, COUNT(HINTS_SAVES));
+		break;
+	case UI_SCREEN_ABOUT:
+		draw_about(ui, p, t);
+		break;
+	case UI_SCREEN_ROM_INFO:
+		draw_rom_info(ui, p, t);
 		break;
 	case UI_SCREEN_KEYBOARD:
 	case UI_SCREEN_GAMEPAD:
